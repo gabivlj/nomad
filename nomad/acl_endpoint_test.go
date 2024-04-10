@@ -1,15 +1,20 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package nomad
 
 import (
 	"fmt"
-	"io/ioutil"
+	"net/url"
+	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	capOIDC "github.com/hashicorp/cap/oidc"
 	"github.com/hashicorp/go-memdb"
-	msgpackrpc "github.com/hashicorp/net-rpc-msgpackrpc"
+	msgpackrpc "github.com/hashicorp/net-rpc-msgpackrpc/v2"
 	"github.com/hashicorp/nomad/ci"
 	"github.com/hashicorp/nomad/helper/uuid"
 	"github.com/hashicorp/nomad/nomad/mock"
@@ -104,6 +109,35 @@ func TestACLEndpoint_GetPolicy(t *testing.T) {
 	err := msgpackrpc.CallWithCodec(codec, "ACL.GetPolicy", get, &resp4)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), structs.ErrPermissionDenied.Error())
+
+	// Generate and upsert an ACL role which links to the previously created
+	// policy.
+	mockACLRole := mock.ACLRole()
+	mockACLRole.Policies = []*structs.ACLRolePolicyLink{{Name: policy.Name}}
+	must.NoError(t, s1.fsm.State().UpsertACLRoles(
+		structs.MsgTypeTestSetup, 1010, []*structs.ACLRole{mockACLRole}, false))
+
+	// Generate and upsert an ACL token which only has ACL role links.
+	mockTokenWithRole := mock.ACLToken()
+	mockTokenWithRole.Policies = []string{}
+	mockTokenWithRole.Roles = []*structs.ACLTokenRoleLink{{ID: mockACLRole.ID}}
+	must.NoError(t, s1.fsm.State().UpsertACLTokens(
+		structs.MsgTypeTestSetup, 1020, []*structs.ACLToken{mockTokenWithRole}))
+
+	// Use the newly created token to attempt to read the policy which is
+	// linked via a role, and not directly referenced within the policy array.
+	req5 := &structs.ACLPolicySpecificRequest{
+		Name: policy.Name,
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: mockTokenWithRole.SecretID,
+		},
+	}
+
+	var resp5 structs.SingleACLPolicyResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, "ACL.GetPolicy", req5, &resp5))
+	must.Eq(t, 1000, resp5.Index)
+	must.Eq(t, policy, resp5.Policy)
 }
 
 func TestACLEndpoint_GetPolicy_Blocking(t *testing.T) {
@@ -237,11 +271,11 @@ func TestACLEndpoint_GetPolicies_TokenSubset(t *testing.T) {
 	// Create the register request
 	policy := mock.ACLPolicy()
 	policy2 := mock.ACLPolicy()
-	s1.fsm.State().UpsertACLPolicies(structs.MsgTypeTestSetup, 1000, []*structs.ACLPolicy{policy, policy2})
+	must.NoError(t, s1.fsm.State().UpsertACLPolicies(structs.MsgTypeTestSetup, 1000, []*structs.ACLPolicy{policy, policy2}))
 
 	token := mock.ACLToken()
 	token.Policies = []string{policy.Name}
-	s1.fsm.State().UpsertACLTokens(structs.MsgTypeTestSetup, 1000, []*structs.ACLToken{token})
+	must.NoError(t, s1.fsm.State().UpsertACLTokens(structs.MsgTypeTestSetup, 1000, []*structs.ACLToken{token}))
 
 	// Lookup the policy which is a subset of our tokens
 	get := &structs.ACLPolicySetRequest{
@@ -252,19 +286,89 @@ func TestACLEndpoint_GetPolicies_TokenSubset(t *testing.T) {
 		},
 	}
 	var resp structs.ACLPolicySetResponse
-	if err := msgpackrpc.CallWithCodec(codec, "ACL.GetPolicies", get, &resp); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	assert.Equal(t, uint64(1000), resp.Index)
-	assert.Equal(t, 1, len(resp.Policies))
-	assert.Equal(t, policy, resp.Policies[policy.Name])
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, "ACL.GetPolicies", get, &resp))
+	must.Eq(t, uint64(1000), resp.Index)
+	must.Eq(t, 1, len(resp.Policies))
+	must.Eq(t, policy, resp.Policies[policy.Name])
 
 	// Lookup non-associated policy
 	get.Names = []string{policy2.Name}
 	resp = structs.ACLPolicySetResponse{}
-	if err := msgpackrpc.CallWithCodec(codec, "ACL.GetPolicies", get, &resp); err == nil {
-		t.Fatalf("expected error")
+	must.Error(t, msgpackrpc.CallWithCodec(codec, "ACL.GetPolicies", get, &resp))
+
+	// Generate and upsert an ACL role which links to the previously created
+	// policy.
+	mockACLRole := mock.ACLRole()
+	mockACLRole.Policies = []*structs.ACLRolePolicyLink{{Name: policy.Name}}
+	must.NoError(t, s1.fsm.State().UpsertACLRoles(
+		structs.MsgTypeTestSetup, 1010, []*structs.ACLRole{mockACLRole}, false))
+
+	// Generate and upsert an ACL token which only has ACL role links.
+	mockTokenWithRole := mock.ACLToken()
+	mockTokenWithRole.Policies = []string{}
+	mockTokenWithRole.Roles = []*structs.ACLTokenRoleLink{{ID: mockACLRole.ID}}
+	must.NoError(t, s1.fsm.State().UpsertACLTokens(
+		structs.MsgTypeTestSetup, 1020, []*structs.ACLToken{mockTokenWithRole}))
+
+	// Use the newly created token to attempt to read the policy which is
+	// linked via a role, and not directly referenced within the policy array.
+	req1 := &structs.ACLPolicySetRequest{
+		Names: []string{policy.Name},
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: mockTokenWithRole.SecretID,
+		},
 	}
+
+	var resp1 structs.ACLPolicySetResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, "ACL.GetPolicies", req1, &resp1))
+	must.Eq(t, 1000, resp1.Index)
+	must.Eq(t, 1, len(resp1.Policies))
+	must.Eq(t, policy, resp1.Policies[policy.Name])
+
+	// Generate and upsert an ACL token which only has both direct policy links
+	// and ACL role links.
+	mockTokenWithRolePolicy := mock.ACLToken()
+	mockTokenWithRolePolicy.Policies = []string{policy2.Name}
+	mockTokenWithRolePolicy.Roles = []*structs.ACLTokenRoleLink{{ID: mockACLRole.ID}}
+	must.NoError(t, s1.fsm.State().UpsertACLTokens(
+		structs.MsgTypeTestSetup, 1030, []*structs.ACLToken{mockTokenWithRolePolicy}))
+
+	// Use the newly created token to attempt to read the policies which are
+	// linked directly, and by ACL roles.
+	req2 := &structs.ACLPolicySetRequest{
+		Names: []string{policy.Name, policy2.Name},
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: mockTokenWithRolePolicy.SecretID,
+		},
+	}
+
+	var resp2 structs.ACLPolicySetResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, "ACL.GetPolicies", req2, &resp2))
+	must.Eq(t, 1000, resp2.Index)
+	must.Eq(t, 2, len(resp2.Policies))
+
+	// Delete one of the policies, which means the ACL token has a dangling
+	// policy. When a Nomad client perform an ACL lookup, it adds the policies
+	// attached to the token within the request arguments. This test section
+	// mimics the behaviour when a token is being used that contains dangling
+	// policies.
+	must.NoError(t, s1.fsm.State().DeleteACLPolicies(structs.MsgTypeTestSetup, 1040, []string{policy.Name}))
+
+	req3 := &structs.ACLPolicySetRequest{
+		Names: []string{policy.Name, policy2.Name},
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: mockTokenWithRolePolicy.SecretID,
+		},
+	}
+
+	var resp3 structs.ACLPolicySetResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, "ACL.GetPolicies", req3, &resp3))
+	must.Eq(t, 1040, resp3.Index)
+	must.MapLen(t, 1, resp3.Policies)
+	must.MapContainsKey(t, resp3.Policies, policy2.Name)
 }
 
 func TestACLEndpoint_GetPolicies_Blocking(t *testing.T) {
@@ -413,6 +517,36 @@ func TestACLEndpoint_ListPolicies(t *testing.T) {
 	if assert.Len(resp3.Policies, 1) {
 		assert.Equal(resp3.Policies[0].Name, p1.Name)
 	}
+
+	// Generate and upsert an ACL role which links to the previously created
+	// policy.
+	mockACLRole := mock.ACLRole()
+	mockACLRole.Policies = []*structs.ACLRolePolicyLink{{Name: p1.Name}}
+	must.NoError(t, s1.fsm.State().UpsertACLRoles(
+		structs.MsgTypeTestSetup, 1010, []*structs.ACLRole{mockACLRole}, false))
+
+	// Generate and upsert an ACL token which only has ACL role links.
+	mockTokenWithRole := mock.ACLToken()
+	mockTokenWithRole.Policies = []string{}
+	mockTokenWithRole.Roles = []*structs.ACLTokenRoleLink{{ID: mockACLRole.ID}}
+	must.NoError(t, s1.fsm.State().UpsertACLTokens(
+		structs.MsgTypeTestSetup, 1020, []*structs.ACLToken{mockTokenWithRole}))
+
+	// Use the newly created token to attempt to list the policies. We should
+	// get the single policy linked by the ACL role.
+	req4 := &structs.ACLPolicyListRequest{
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: mockTokenWithRole.SecretID,
+		},
+	}
+
+	var resp4 structs.ACLPolicyListResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, "ACL.ListPolicies", req4, &resp4))
+	must.Eq(t, 1000, resp4.Index)
+	must.Len(t, 1, resp4.Policies)
+	must.Eq(t, p1.Name, resp4.Policies[0].Name)
+	must.Eq(t, p1.Hash, resp4.Policies[0].Hash)
 }
 
 // TestACLEndpoint_ListPolicies_Unauthenticated asserts that
@@ -608,10 +742,8 @@ func TestACLEndpoint_UpsertPolicies_Invalid(t *testing.T) {
 	}
 	var resp structs.GenericResponse
 	err := msgpackrpc.CallWithCodec(codec, "ACL.UpsertPolicies", req, &resp)
-	assert.NotNil(t, err)
-	if !strings.Contains(err.Error(), "failed to parse") {
-		t.Fatalf("bad: %s", err)
-	}
+	must.ErrorContains(t, err, "400")
+	must.ErrorContains(t, err, "failed to parse")
 }
 
 func TestACLEndpoint_GetToken(t *testing.T) {
@@ -1423,7 +1555,7 @@ func TestACLEndpoint_Bootstrap_Reset(t *testing.T) {
 	// Create the reset file
 	output := []byte(fmt.Sprintf("%d", resetIdx))
 	path := filepath.Join(dir, aclBootstrapReset)
-	assert.Nil(t, ioutil.WriteFile(path, output, 0755))
+	assert.Nil(t, os.WriteFile(path, output, 0755))
 
 	// Try again, should work with reset
 	if err := msgpackrpc.CallWithCodec(codec, "ACL.Bootstrap", req, &resp); err != nil {
@@ -1456,8 +1588,7 @@ func TestACLEndpoint_UpsertTokens(t *testing.T) {
 	ci.Parallel(t)
 
 	// Each sub-test uses the same server to avoid creating a new one for each
-	// test. This means some care has to be taken with resource naming, but
-	// does avoid lots of calls to systems such as freeport.
+	// test. This means some care has to be taken with resource naming.
 	testServer, rootACLToken, testServerCleanup := TestACLServer(t, nil)
 	defer testServerCleanup()
 	codec := rpcClient(t, testServer)
@@ -1486,7 +1617,7 @@ func TestACLEndpoint_UpsertTokens(t *testing.T) {
 				}
 				var resp structs.ACLTokenUpsertResponse
 				require.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLUpsertTokensRPCMethod, req, &resp))
-				must.Greater(t, resp.Index, 0)
+				must.Positive(t, resp.Index)
 
 				// Get the token out from the response.
 				created := resp.Tokens[0]
@@ -1782,6 +1913,51 @@ func TestACLEndpoint_ResolveToken(t *testing.T) {
 	assert.Nil(t, resp.Token)
 }
 
+func TestACLEndpoint_WhoAmI(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, _, cleanupS1 := TestACLServer(t, nil)
+	t.Cleanup(cleanupS1)
+	codec := rpcClient(t, s1)
+	testutil.WaitForKeyring(t, s1.RPC, "global")
+
+	// Create the register request
+	token := mock.ACLToken()
+	s1.fsm.State().UpsertACLTokens(structs.MsgTypeTestSetup, 1000, []*structs.ACLToken{token})
+
+	// Lookup via token
+	get := &structs.GenericRequest{
+		QueryOptions: structs.QueryOptions{Region: "global", AuthToken: token.SecretID},
+	}
+	var resp structs.ACLWhoAmIResponse
+	err := msgpackrpc.CallWithCodec(codec, "ACL.WhoAmI", get, &resp)
+	must.NoError(t, err)
+	must.Eq(t, token, resp.Identity.ACLToken)
+
+	// Lookup non-existing token
+	get.AuthToken = uuid.Generate()
+	var resp2 structs.ACLWhoAmIResponse
+	err = msgpackrpc.CallWithCodec(codec, "ACL.WhoAmI", get, &resp2)
+	must.EqError(t, err, structs.ErrPermissionDenied.Error())
+	must.Nil(t, resp2.Identity)
+
+	// Lookup identity claim
+	alloc := mock.Alloc()
+	s1.fsm.State().UpsertAllocs(structs.MsgTypeTestSetup, 1500, []*structs.Allocation{alloc})
+	claims := structs.NewIdentityClaims(alloc.Job, alloc,
+		wiHandle, // see encrypter_test.go
+		alloc.LookupTask("web").Identity, time.Now().Add(-10*time.Minute))
+	jwtToken, _, err := s1.encrypter.SignClaims(claims)
+	must.NoError(t, err)
+
+	get.AuthToken = jwtToken
+	var resp3 structs.ACLWhoAmIResponse
+	err = msgpackrpc.CallWithCodec(codec, "ACL.WhoAmI", get, &resp3)
+	must.NoError(t, err)
+	must.NotNil(t, resp3.Identity.Claims)
+	must.Eq(t, alloc.ID, resp3.Identity.Claims.AllocationID)
+}
+
 func TestACLEndpoint_OneTimeToken(t *testing.T) {
 	ci.Parallel(t)
 
@@ -1959,7 +2135,7 @@ func TestACL_UpsertRoles(t *testing.T) {
 	err = msgpackrpc.CallWithCodec(codec, structs.ACLUpsertRolesRPCMethod, aclRoleReq3, &aclRoleResp3)
 	require.NoError(t, err)
 	require.Len(t, aclRoleResp3.ACLRoles, 1)
-	require.True(t, aclRole1.Equals(aclRoleResp3.ACLRoles[0]))
+	require.True(t, aclRole1.Equal(aclRoleResp3.ACLRoles[0]))
 
 	// Perform an update of the ACL role by removing a policy and changing the
 	// name.
@@ -1979,7 +2155,7 @@ func TestACL_UpsertRoles(t *testing.T) {
 	err = msgpackrpc.CallWithCodec(codec, structs.ACLUpsertRolesRPCMethod, aclRoleReq4, &aclRoleResp4)
 	require.NoError(t, err)
 	require.Len(t, aclRoleResp4.ACLRoles, 1)
-	require.True(t, aclRole1Copy.Equals(aclRoleResp4.ACLRoles[0]))
+	require.True(t, aclRole1Copy.Equal(aclRoleResp4.ACLRoles[0]))
 	require.Greater(t, aclRoleResp4.ACLRoles[0].ModifyIndex, aclRoleResp3.ACLRoles[0].ModifyIndex)
 
 	// Create another ACL role that will fail validation. Attempting to upsert
@@ -2073,7 +2249,7 @@ func TestACL_DeleteRolesByID(t *testing.T) {
 	}
 
 	require.Len(t, aclRolesLookup, 1)
-	require.True(t, aclRolesLookup[0].Equals(aclRoles[1]))
+	require.True(t, aclRolesLookup[0].Equal(aclRoles[1]))
 
 	// Try to delete the previously deleted ACL role, this should fail.
 	aclRoleReq3 := &structs.ACLRolesDeleteByIDRequest{
@@ -2121,7 +2297,7 @@ func TestACL_ListRoles(t *testing.T) {
 	}
 	var aclRoleResp1 structs.ACLRolesListResponse
 	err := msgpackrpc.CallWithCodec(codec, structs.ACLListRolesRPCMethod, aclRoleReq1, &aclRoleResp1)
-	require.ErrorContains(t, err, "ACL token not found")
+	require.ErrorContains(t, err, structs.ErrPermissionDenied.Error())
 
 	// Try listing roles with a valid ACL token.
 	aclRoleReq2 := &structs.ACLRolesListRequest{
@@ -2228,6 +2404,7 @@ func TestACL_GetRolesByID(t *testing.T) {
 
 	// Try reading a role without setting a correct auth token.
 	aclRoleReq1 := &structs.ACLRolesByIDRequest{
+		ACLRoleIDs: []string{"nope"},
 		QueryOptions: structs.QueryOptions{
 			Region: DefaultRegion,
 		},
@@ -2278,6 +2455,48 @@ func TestACL_GetRolesByID(t *testing.T) {
 	require.Contains(t, aclRoleResp3.ACLRoles, aclRoles[0].ID)
 	require.Contains(t, aclRoleResp3.ACLRoles, aclRoles[1].ID)
 
+	// Create a client token which allows us to test client tokens looking up
+	// their own role assignments.
+	clientToken1 := &structs.ACLToken{
+		AccessorID: uuid.Generate(),
+		SecretID:   uuid.Generate(),
+		Name:       "acl-endpoint-test-role",
+		Type:       structs.ACLClientToken,
+		Roles:      []*structs.ACLTokenRoleLink{{ID: aclRoles[0].ID}},
+	}
+	clientToken1.SetHash()
+
+	require.NoError(t, testServer.fsm.State().UpsertACLTokens(
+		structs.MsgTypeTestSetup, 10, []*structs.ACLToken{clientToken1}))
+
+	// Use the client token in an attempt to look up an ACL role which is
+	// assigned to the token, and therefore should work.
+	aclRoleReq4 := &structs.ACLRolesByIDRequest{
+		ACLRoleIDs: []string{aclRoles[0].ID},
+		QueryOptions: structs.QueryOptions{
+			Region:    DefaultRegion,
+			AuthToken: clientToken1.SecretID,
+		},
+	}
+	var aclRoleResp4 structs.ACLRolesByIDResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRolesByIDRPCMethod, aclRoleReq4, &aclRoleResp4)
+	require.NoError(t, err)
+	require.Len(t, aclRoleResp4.ACLRoles, 1)
+	require.Contains(t, aclRoleResp4.ACLRoles, aclRoles[0].ID)
+
+	// Use the client token in an attempt to look up an ACL role which is NOT
+	// assigned to the token which should fail.
+	aclRoleReq5 := &structs.ACLRolesByIDRequest{
+		ACLRoleIDs: []string{aclRoles[1].ID},
+		QueryOptions: structs.QueryOptions{
+			Region:    DefaultRegion,
+			AuthToken: clientToken1.SecretID,
+		},
+	}
+	var aclRoleResp5 structs.ACLRolesByIDResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRolesByIDRPCMethod, aclRoleReq5, &aclRoleResp5)
+	require.ErrorContains(t, err, "Permission denied")
+
 	// Now test a blocking query, where we wait for an update to the set which
 	// is triggered by a deletion.
 	type res struct {
@@ -2287,7 +2506,7 @@ func TestACL_GetRolesByID(t *testing.T) {
 	resultCh := make(chan *res)
 
 	go func(resultCh chan *res) {
-		aclRoleReq5 := &structs.ACLRolesByIDRequest{
+		aclRoleReq6 := &structs.ACLRolesByIDRequest{
 			ACLRoleIDs: []string{aclRoles[0].ID, aclRoles[1].ID},
 			QueryOptions: structs.QueryOptions{
 				Region:        DefaultRegion,
@@ -2296,9 +2515,9 @@ func TestACL_GetRolesByID(t *testing.T) {
 				MaxQueryTime:  10 * time.Second,
 			},
 		}
-		var aclRoleResp5 structs.ACLRolesByIDResponse
-		err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRolesByIDRPCMethod, aclRoleReq5, &aclRoleResp5)
-		resultCh <- &res{err: err, reply: &aclRoleResp5}
+		var aclRoleResp6 structs.ACLRolesByIDResponse
+		err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRolesByIDRPCMethod, aclRoleReq6, &aclRoleResp6)
+		resultCh <- &res{err: err, reply: &aclRoleResp6}
 	}(resultCh)
 
 	// Delete an ACL role from state which should return the blocking query.
@@ -2368,7 +2587,7 @@ func TestACL_GetRoleByID(t *testing.T) {
 	var aclRoleResp3 structs.ACLRoleByIDResponse
 	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRoleByIDRPCMethod, aclRoleReq3, &aclRoleResp3)
 	require.NoError(t, err)
-	require.True(t, aclRoleResp3.ACLRole.Equals(aclRoles[0]))
+	require.True(t, aclRoleResp3.ACLRole.Equal(aclRoles[0]))
 
 	aclRoleReq4 := &structs.ACLRoleByIDRequest{
 		RoleID: aclRoles[1].ID,
@@ -2380,7 +2599,7 @@ func TestACL_GetRoleByID(t *testing.T) {
 	var aclRoleResp4 structs.ACLRoleByIDResponse
 	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRoleByIDRPCMethod, aclRoleReq4, &aclRoleResp4)
 	require.NoError(t, err)
-	require.True(t, aclRoleResp4.ACLRole.Equals(aclRoles[1]))
+	require.True(t, aclRoleResp4.ACLRole.Equal(aclRoles[1]))
 
 	// Generate and upsert an ACL Token which links to only one of the two
 	// roles within state.
@@ -2473,7 +2692,7 @@ func TestACL_GetRoleByName(t *testing.T) {
 	var aclRoleResp3 structs.ACLRoleByNameResponse
 	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRoleByNameRPCMethod, aclRoleReq3, &aclRoleResp3)
 	require.NoError(t, err)
-	require.True(t, aclRoleResp3.ACLRole.Equals(aclRoles[0]))
+	require.True(t, aclRoleResp3.ACLRole.Equal(aclRoles[0]))
 
 	aclRoleReq4 := &structs.ACLRoleByNameRequest{
 		RoleName: aclRoles[1].Name,
@@ -2485,7 +2704,7 @@ func TestACL_GetRoleByName(t *testing.T) {
 	var aclRoleResp4 structs.ACLRoleByNameResponse
 	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRoleByNameRPCMethod, aclRoleReq4, &aclRoleResp4)
 	require.NoError(t, err)
-	require.True(t, aclRoleResp4.ACLRole.Equals(aclRoles[1]))
+	require.True(t, aclRoleResp4.ACLRole.Equal(aclRoles[1]))
 
 	// Generate and upsert an ACL Token which links to only one of the two
 	// roles within state.
@@ -2522,4 +2741,1236 @@ func TestACL_GetRoleByName(t *testing.T) {
 	var aclRoleResp6 structs.ACLRoleByNameResponse
 	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetRoleByNameRPCMethod, aclRoleReq6, &aclRoleResp6)
 	require.ErrorContains(t, err, "Permission denied")
+}
+
+func TestACLEndpoint_GetAuthMethod(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, root, cleanupS1 := TestACLServer(t, nil)
+	defer cleanupS1()
+	codec := rpcClient(t, s1)
+	testutil.WaitForLeader(t, s1.RPC)
+
+	// Create the register request
+	authMethod := mock.ACLOIDCAuthMethod()
+	must.NoError(t, s1.fsm.State().UpsertACLAuthMethods(1000, []*structs.ACLAuthMethod{authMethod}))
+
+	anonymousAuthMethod := mock.ACLOIDCAuthMethod()
+	anonymousAuthMethod.Name = "anonymous"
+	must.NoError(t, s1.fsm.State().UpsertACLAuthMethods(1001, []*structs.ACLAuthMethod{anonymousAuthMethod}))
+
+	// Lookup the authMethod
+	get := &structs.ACLAuthMethodGetRequest{
+		MethodName: authMethod.Name,
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: root.SecretID,
+		},
+	}
+	var resp structs.ACLAuthMethodGetResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLGetAuthMethodRPCMethod, get, &resp))
+	must.Eq(t, uint64(1000), resp.Index)
+	must.Eq(t, authMethod, resp.AuthMethod)
+
+	// Lookup non-existing authMethod
+	get.MethodName = uuid.Generate()
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLGetAuthMethodRPCMethod, get, &resp))
+	must.Eq(t, uint64(1001), resp.Index)
+	must.Nil(t, resp.AuthMethod)
+}
+
+func TestACLEndpoint_GetAuthMethod_Blocking(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, root, cleanupS1 := TestACLServer(t, nil)
+	defer cleanupS1()
+	state := s1.fsm.State()
+	codec := rpcClient(t, s1)
+	testutil.WaitForLeader(t, s1.RPC)
+
+	// Create the authMethods
+	am1 := mock.ACLOIDCAuthMethod()
+	am2 := mock.ACLOIDCAuthMethod()
+
+	// First create an unrelated authMethod
+	time.AfterFunc(100*time.Millisecond, func() {
+		must.NoError(t, state.UpsertACLAuthMethods(100, []*structs.ACLAuthMethod{am1}))
+	})
+
+	// Upsert the authMethod we are watching later
+	time.AfterFunc(200*time.Millisecond, func() {
+		must.NoError(t, state.UpsertACLAuthMethods(200, []*structs.ACLAuthMethod{am2}))
+	})
+
+	// Lookup the authMethod
+	req := &structs.ACLAuthMethodGetRequest{
+		MethodName: am2.Name,
+		QueryOptions: structs.QueryOptions{
+			Region:        "global",
+			MinQueryIndex: 150,
+			AuthToken:     root.SecretID,
+		},
+	}
+	var resp structs.ACLAuthMethodGetResponse
+	start := time.Now()
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLGetAuthMethodRPCMethod, req, &resp))
+
+	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
+		t.Fatalf("should block (returned in %s) %#v", elapsed, resp)
+	}
+	must.Eq(t, resp.Index, 200)
+	must.NotNil(t, resp.AuthMethod)
+	must.Eq(t, resp.AuthMethod.Name, am2.Name)
+
+	// Auth method delete triggers watches
+	time.AfterFunc(100*time.Millisecond, func() {
+		must.NoError(t, state.DeleteACLAuthMethods(300, []string{am2.Name}))
+	})
+
+	req.QueryOptions.MinQueryIndex = 250
+	var resp2 structs.ACLAuthMethodGetResponse
+	start = time.Now()
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLGetAuthMethodRPCMethod, req, &resp2))
+
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("should block (returned in %s) %#v", elapsed, resp2)
+	}
+	must.Eq(t, resp2.Index, 300)
+	must.Nil(t, resp2.AuthMethod)
+}
+
+func TestACLEndpoint_GetAuthMethods(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, root, cleanupS1 := TestACLServer(t, nil)
+	defer cleanupS1()
+	codec := rpcClient(t, s1)
+	testutil.WaitForLeader(t, s1.RPC)
+
+	// Create the register request
+	authMethod := mock.ACLOIDCAuthMethod()
+	authMethod2 := mock.ACLOIDCAuthMethod()
+	must.NoError(t, s1.fsm.State().UpsertACLAuthMethods(1000, []*structs.ACLAuthMethod{authMethod, authMethod2}))
+
+	// Lookup the authMethod
+	get := &structs.ACLAuthMethodsGetRequest{
+		Names: []string{authMethod.Name, authMethod2.Name},
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: root.SecretID,
+		},
+	}
+	var resp structs.ACLAuthMethodsGetResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLGetAuthMethodsRPCMethod, get, &resp))
+	must.Eq(t, uint64(1000), resp.Index)
+	must.Eq(t, 2, len(resp.AuthMethods))
+	must.Eq(t, authMethod, resp.AuthMethods[authMethod.Name])
+	must.Eq(t, authMethod2, resp.AuthMethods[authMethod2.Name])
+
+	// Lookup non-existing authMethod
+	get.Names = []string{uuid.Generate()}
+	resp = structs.ACLAuthMethodsGetResponse{}
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLGetAuthMethodsRPCMethod, get, &resp))
+	must.Eq(t, uint64(1000), resp.Index)
+	must.Eq(t, 0, len(resp.AuthMethods))
+}
+
+func TestACLEndpoint_GetAuthMethods_Blocking(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, root, cleanupS1 := TestACLServer(t, nil)
+	defer cleanupS1()
+	state := s1.fsm.State()
+	codec := rpcClient(t, s1)
+	testutil.WaitForLeader(t, s1.RPC)
+
+	// Create the authMethods
+	am1 := mock.ACLOIDCAuthMethod()
+	am2 := mock.ACLOIDCAuthMethod()
+
+	// First create an unrelated authMethod
+	time.AfterFunc(100*time.Millisecond, func() {
+		must.NoError(t, state.UpsertACLAuthMethods(100, []*structs.ACLAuthMethod{am1}))
+	})
+
+	// Upsert the authMethod we are watching later
+	time.AfterFunc(200*time.Millisecond, func() {
+		must.NoError(t, state.UpsertACLAuthMethods(200, []*structs.ACLAuthMethod{am2}))
+	})
+
+	// Lookup the authMethod
+	req := &structs.ACLAuthMethodsGetRequest{
+		Names: []string{am2.Name},
+		QueryOptions: structs.QueryOptions{
+			Region:        "global",
+			MinQueryIndex: 150,
+			AuthToken:     root.SecretID,
+		},
+	}
+	var resp structs.ACLAuthMethodsGetResponse
+	start := time.Now()
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLGetAuthMethodsRPCMethod, req, &resp))
+
+	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
+		t.Fatalf("should block (returned in %s) %#v", elapsed, resp)
+	}
+	must.Eq(t, resp.Index, 200)
+	must.NotEq(t, len(resp.AuthMethods), 0)
+	must.NotNil(t, resp.AuthMethods[am2.Name])
+
+	// Auth method delete triggers watches
+	time.AfterFunc(100*time.Millisecond, func() {
+		must.NoError(t, state.DeleteACLAuthMethods(300, []string{am2.Name}))
+	})
+
+	req.QueryOptions.MinQueryIndex = 250
+	var resp2 structs.ACLAuthMethodsGetResponse
+	start = time.Now()
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLGetAuthMethodsRPCMethod, req, &resp2))
+
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("should block (returned in %s) %#v", elapsed, resp2)
+	}
+	must.Eq(t, resp2.Index, 300)
+	must.Eq(t, len(resp2.AuthMethods), 0)
+}
+
+func TestACLEndpoint_ListAuthMethods(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, root, cleanupS1 := TestACLServer(t, nil)
+	defer cleanupS1()
+	codec := rpcClient(t, s1)
+	testutil.WaitForLeader(t, s1.RPC)
+
+	// Create the register request
+	am1 := mock.ACLOIDCAuthMethod()
+	am2 := mock.ACLOIDCAuthMethod()
+
+	am1.Name = "aaaaaaaa-3350-4b4b-d185-0e1992ed43e9"
+	am2.Name = "aaaabbbb-3350-4b4b-d185-0e1992ed43e9"
+	must.NoError(t, s1.fsm.State().UpsertACLAuthMethods(1000, []*structs.ACLAuthMethod{am1, am2}))
+
+	// Create a token
+	token := mock.ACLToken()
+	must.NoError(t, s1.fsm.State().UpsertACLTokens(structs.MsgTypeTestSetup, 1001, []*structs.ACLToken{token}))
+
+	// Lookup the authMethods with a management token
+	get := &structs.ACLAuthMethodListRequest{
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: root.SecretID,
+		},
+	}
+	var resp structs.ACLAuthMethodListResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLListAuthMethodsRPCMethod, get, &resp))
+	must.Eq(t, 1000, resp.Index)
+	must.Len(t, 2, resp.AuthMethods)
+
+	// List authMethods using the created token
+	get = &structs.ACLAuthMethodListRequest{
+		QueryOptions: structs.QueryOptions{
+			Region:    "global",
+			AuthToken: token.SecretID,
+		},
+	}
+	var resp3 structs.ACLAuthMethodListResponse
+	if err := msgpackrpc.CallWithCodec(codec, structs.ACLListAuthMethodsRPCMethod, get, &resp3); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	must.Eq(t, 1000, resp3.Index)
+	must.Len(t, 2, resp3.AuthMethods)
+	must.Eq(t, resp3.AuthMethods[0].Name, am1.Name)
+}
+
+func TestACLEndpoint_ListAuthMethods_Blocking(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, root, cleanupS1 := TestACLServer(t, nil)
+	defer cleanupS1()
+	state := s1.fsm.State()
+	codec := rpcClient(t, s1)
+	testutil.WaitForLeader(t, s1.RPC)
+
+	// Create the authMethod
+	authMethod := mock.ACLOIDCAuthMethod()
+
+	// Upsert auth method triggers watches
+	time.AfterFunc(100*time.Millisecond, func() {
+		must.NoError(t, state.UpsertACLAuthMethods(2, []*structs.ACLAuthMethod{authMethod}))
+	})
+
+	req := &structs.ACLAuthMethodListRequest{
+		QueryOptions: structs.QueryOptions{
+			Region:        "global",
+			MinQueryIndex: 1,
+			AuthToken:     root.SecretID,
+		},
+	}
+	start := time.Now()
+	var resp structs.ACLAuthMethodListResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLListAuthMethodsRPCMethod, req, &resp))
+
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("should block (returned in %s) %#v", elapsed, resp)
+	}
+	must.Eq(t, uint64(2), resp.Index)
+	must.Len(t, 1, resp.AuthMethods)
+	must.Eq(t, resp.AuthMethods[0].Name, authMethod.Name)
+
+	// Eval deletion triggers watches
+	time.AfterFunc(100*time.Millisecond, func() {
+		must.NoError(t, state.DeleteACLAuthMethods(3, []string{authMethod.Name}))
+	})
+
+	req.MinQueryIndex = 2
+	start = time.Now()
+	var resp2 structs.ACLAuthMethodListResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLListAuthMethodsRPCMethod, req, &resp2))
+
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("should block (returned in %s) %#v", elapsed, resp2)
+	}
+	must.Eq(t, uint64(3), resp2.Index)
+	must.Eq(t, 0, len(resp2.AuthMethods))
+}
+
+func TestACLEndpoint_DeleteAuthMethods(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, root, cleanupS1 := TestACLServer(t, nil)
+	defer cleanupS1()
+	codec := rpcClient(t, s1)
+	testutil.WaitForLeader(t, s1.RPC)
+
+	// Create the register request
+	am1 := mock.ACLOIDCAuthMethod()
+	must.NoError(t, s1.fsm.State().UpsertACLAuthMethods(1000, []*structs.ACLAuthMethod{am1}))
+
+	// Lookup the authMethods
+	req := &structs.ACLAuthMethodDeleteRequest{
+		Names: []string{am1.Name},
+		WriteRequest: structs.WriteRequest{
+			Region:    "global",
+			AuthToken: root.SecretID,
+		},
+	}
+	var resp structs.ACLAuthMethodDeleteResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLDeleteAuthMethodsRPCMethod, req, &resp))
+	must.NotEq(t, uint64(0), resp.Index)
+
+	// Try to delete a non-existing auth method
+	req = &structs.ACLAuthMethodDeleteRequest{
+		Names: []string{"non-existing-auth-method"},
+		WriteRequest: structs.WriteRequest{
+			Region:    "global",
+			AuthToken: root.SecretID,
+		},
+	}
+	var resp2 structs.ACLAuthMethodDeleteResponse
+	must.Error(t, msgpackrpc.CallWithCodec(codec, structs.ACLDeleteAuthMethodsRPCMethod, req, &resp2))
+}
+
+func TestACLEndpoint_UpsertACLAuthMethods(t *testing.T) {
+	ci.Parallel(t)
+
+	s1, root, cleanupS1 := TestACLServer(t, nil)
+	defer cleanupS1()
+	codec := rpcClient(t, s1)
+	testutil.WaitForLeader(t, s1.RPC)
+
+	minTTL, _ := time.ParseDuration("10s")
+	maxTTL, _ := time.ParseDuration("24h")
+	s1.config.ACLTokenMinExpirationTTL = minTTL
+	s1.config.ACLTokenMaxExpirationTTL = maxTTL
+
+	// Create the register request
+	am1 := mock.ACLOIDCAuthMethod()
+	am1.Default = true // make sure it's going to be a default method
+	am1.SetHash()
+
+	// Lookup the authMethods
+	req := &structs.ACLAuthMethodUpsertRequest{
+		AuthMethods: []*structs.ACLAuthMethod{am1},
+		WriteRequest: structs.WriteRequest{
+			Region:    "global",
+			AuthToken: root.SecretID,
+		},
+	}
+	var resp structs.ACLAuthMethodUpsertResponse
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLUpsertAuthMethodsRPCMethod, req, &resp))
+	must.NotEq(t, uint64(0), resp.Index)
+
+	// Check we created the authMethod
+	out, err := s1.fsm.State().GetACLAuthMethodByName(nil, am1.Name)
+	must.Nil(t, err)
+	must.NotNil(t, out)
+	must.NotEq(t, 0, len(resp.AuthMethods))
+	must.True(t, am1.Equal(resp.AuthMethods[0]))
+
+	// Try to insert another default authMethod
+	am2 := mock.ACLOIDCAuthMethod()
+	am2.Default = true
+	req = &structs.ACLAuthMethodUpsertRequest{
+		AuthMethods: []*structs.ACLAuthMethod{am2},
+		WriteRequest: structs.WriteRequest{
+			Region:    "global",
+			AuthToken: root.SecretID,
+		},
+	}
+	// We expect this to err since there's already a default method of the same type
+	must.Error(t, msgpackrpc.CallWithCodec(codec, structs.ACLUpsertAuthMethodsRPCMethod, req, &resp))
+
+	// Update token locality
+	am3 := &structs.ACLAuthMethod{Name: am1.Name, TokenLocality: "global"}
+	req = &structs.ACLAuthMethodUpsertRequest{
+		AuthMethods: []*structs.ACLAuthMethod{am3},
+		WriteRequest: structs.WriteRequest{
+			Region:    "global",
+			AuthToken: root.SecretID,
+		},
+	}
+	must.NoError(t, msgpackrpc.CallWithCodec(codec, structs.ACLUpsertAuthMethodsRPCMethod, req, &resp))
+	must.Eq(t, resp.AuthMethods[0].TokenLocality, am3.TokenLocality)
+}
+
+func TestACL_UpsertBindingRules(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, aclRootToken, testServerCleanupFn := TestACLServer(t, nil)
+	defer testServerCleanupFn()
+	codec := rpcClient(t, testServer)
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	// Create a mock ACL binding rule and remove the ID so this looks like a
+	// creation.
+	aclBindingRule1 := mock.ACLBindingRule()
+	aclBindingRule1.ID = ""
+
+	// Attempt to upsert this binding rule without setting an ACL token. This
+	// should fail.
+	aclBindingRuleReq1 := &structs.ACLBindingRulesUpsertRequest{
+		ACLBindingRules: []*structs.ACLBindingRule{aclBindingRule1},
+		WriteRequest: structs.WriteRequest{
+			Region: "global",
+		},
+	}
+	var aclBindingRuleResp1 structs.ACLBindingRulesUpsertResponse
+	err := msgpackrpc.CallWithCodec(codec, structs.ACLUpsertBindingRulesRPCMethod, aclBindingRuleReq1, &aclBindingRuleResp1)
+	must.EqError(t, err, "Permission denied")
+
+	// Attempt to upsert this binding rule that references a auth method that
+	// does not exist in state.
+	aclBindingRuleReq2 := &structs.ACLBindingRulesUpsertRequest{
+		ACLBindingRules: []*structs.ACLBindingRule{aclBindingRule1},
+		WriteRequest: structs.WriteRequest{
+			Region:    "global",
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp2 structs.ACLBindingRulesUpsertResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLUpsertBindingRulesRPCMethod, aclBindingRuleReq2, &aclBindingRuleResp2)
+	must.EqError(t, err, "RPC Error:: 400,ACL auth method auth0 not found")
+
+	// Create the policies our ACL roles wants to link to.
+	authMethod := mock.ACLOIDCAuthMethod()
+	authMethod.Name = aclBindingRule1.AuthMethod
+
+	must.NoError(t, testServer.fsm.State().UpsertACLAuthMethods(10, []*structs.ACLAuthMethod{authMethod}))
+
+	// Try the upsert a third time, which should succeed.
+	aclBindingRuleReq3 := &structs.ACLBindingRulesUpsertRequest{
+		ACLBindingRules: []*structs.ACLBindingRule{aclBindingRule1},
+		WriteRequest: structs.WriteRequest{
+			Region:    "global",
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp3 structs.ACLBindingRulesUpsertResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLUpsertBindingRulesRPCMethod, aclBindingRuleReq3, &aclBindingRuleResp3)
+	must.NoError(t, err)
+	must.Len(t, 1, aclBindingRuleResp3.ACLBindingRules)
+
+	// Perform an update of the ACL binding rule by updating the description.
+	aclBindingRule1Copy := aclBindingRule1.Copy()
+	aclBindingRule1Copy.Description = "updated-description"
+
+	aclBindingRuleReq4 := &structs.ACLBindingRulesUpsertRequest{
+		ACLBindingRules: []*structs.ACLBindingRule{aclBindingRule1},
+		WriteRequest: structs.WriteRequest{
+			Region:    "global",
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp4 structs.ACLBindingRulesUpsertResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLUpsertBindingRulesRPCMethod, aclBindingRuleReq4, &aclBindingRuleResp4)
+	must.NoError(t, err)
+	must.Len(t, 1, aclBindingRuleResp4.ACLBindingRules)
+	must.Greater(t, aclBindingRuleResp3.ACLBindingRules[0].ModifyIndex, aclBindingRuleResp4.ACLBindingRules[0].ModifyIndex)
+
+	// Create another ACL binding rule that will fail validation. Attempting to
+	// upsert this ensures the handler is triggering the validation function.
+	aclBindingRule2 := mock.ACLBindingRule()
+	aclBindingRule2.ID = ""
+	aclBindingRule2.BindType = ""
+
+	aclBindingRuleReq5 := &structs.ACLBindingRulesUpsertRequest{
+		ACLBindingRules: []*structs.ACLBindingRule{aclBindingRule2},
+		WriteRequest: structs.WriteRequest{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp5 structs.ACLBindingRulesUpsertResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLUpsertBindingRulesRPCMethod, aclBindingRuleReq5, &aclBindingRuleResp5)
+	must.Error(t, err)
+	must.StrContains(t, err.Error(), "bind type is missing")
+}
+
+func TestACL_DeleteBindingRules(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, aclRootToken, testServerCleanupFn := TestACLServer(t, nil)
+	defer testServerCleanupFn()
+	codec := rpcClient(t, testServer)
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	// Create two ACL binding rules and put these directly into state.
+	aclBindingRules := []*structs.ACLBindingRule{mock.ACLBindingRule(), mock.ACLBindingRule()}
+	must.NoError(t, testServer.State().UpsertACLBindingRules(10, aclBindingRules, true))
+
+	// Attempt to delete an ACL binding rule without setting an auth token.
+	// This should fail.
+	aclBindingRuleReq1 := &structs.ACLBindingRulesDeleteRequest{
+		ACLBindingRuleIDs: []string{aclBindingRules[0].ID},
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+	var aclBindingRuleResp1 structs.ACLBindingRulesDeleteResponse
+	err := msgpackrpc.CallWithCodec(codec, structs.ACLDeleteBindingRulesRPCMethod, aclBindingRuleReq1, &aclBindingRuleResp1)
+	must.EqError(t, err, "Permission denied")
+
+	// Attempt to delete an ACL binding rule now using a valid management token
+	// which should succeed.
+	aclBindingRuleReq2 := &structs.ACLBindingRulesDeleteRequest{
+		ACLBindingRuleIDs: []string{aclBindingRules[0].ID},
+		WriteRequest: structs.WriteRequest{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp2 structs.ACLBindingRulesDeleteResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLDeleteBindingRulesRPCMethod, aclBindingRuleReq2, &aclBindingRuleResp2)
+	must.NoError(t, err)
+
+	// Ensure the deleted binding rule is not found within state and that the
+	// other is.
+	ws := memdb.NewWatchSet()
+	iter, err := testServer.State().GetACLBindingRules(ws)
+	must.NoError(t, err)
+
+	var aclBindingRulesLookup []*structs.ACLBindingRule
+	for raw := iter.Next(); raw != nil; raw = iter.Next() {
+		aclBindingRulesLookup = append(aclBindingRulesLookup, raw.(*structs.ACLBindingRule))
+	}
+
+	must.Len(t, 1, aclBindingRulesLookup)
+	must.Eq(t, aclBindingRulesLookup[0], aclBindingRules[1])
+
+	// Try to delete the previously deleted ACL binding rule, this should fail.
+	aclBindingRuleReq3 := &structs.ACLBindingRulesDeleteRequest{
+		ACLBindingRuleIDs: []string{aclBindingRules[0].ID},
+		WriteRequest: structs.WriteRequest{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp3 structs.ACLBindingRulesDeleteResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLDeleteBindingRulesRPCMethod, aclBindingRuleReq3, &aclBindingRuleResp3)
+	must.EqError(t, err, "ACL binding rule not found")
+}
+
+func TestACL_ListBindingRules(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, aclRootToken, testServerCleanupFn := TestACLServer(t, nil)
+	defer testServerCleanupFn()
+	codec := rpcClient(t, testServer)
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	// Create two ACL binding rules and put these directly into state.
+	aclBindingRules := []*structs.ACLBindingRule{mock.ACLBindingRule(), mock.ACLBindingRule()}
+	must.NoError(t, testServer.State().UpsertACLBindingRules(10, aclBindingRules, true))
+
+	// Try listing binding rules without a valid ACL token.
+	aclBindingRuleReq1 := &structs.ACLBindingRulesListRequest{
+		QueryOptions: structs.QueryOptions{
+			Region: DefaultRegion,
+		},
+	}
+	var aclBindingRuleResp1 structs.ACLBindingRulesListResponse
+	err := msgpackrpc.CallWithCodec(codec, structs.ACLListBindingRulesRPCMethod, aclBindingRuleReq1, &aclBindingRuleResp1)
+	must.EqError(t, err, "Permission denied")
+
+	// Try listing roles with a valid ACL token.
+	aclBindingRuleReq2 := &structs.ACLBindingRulesListRequest{
+		QueryOptions: structs.QueryOptions{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp2 structs.ACLBindingRulesListResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLListBindingRulesRPCMethod, aclBindingRuleReq2, &aclBindingRuleResp2)
+	must.NoError(t, err)
+	must.Len(t, 2, aclBindingRuleResp2.ACLBindingRules)
+
+	// Now test a blocking query, where we wait for an update to the list which
+	// is triggered by a deletion.
+	type res struct {
+		err   error
+		reply *structs.ACLBindingRulesListResponse
+	}
+	resultCh := make(chan *res)
+
+	go func(resultCh chan *res) {
+		aclBindingRuleReq3 := &structs.ACLBindingRulesListRequest{
+			QueryOptions: structs.QueryOptions{
+				Region:        DefaultRegion,
+				AuthToken:     aclRootToken.SecretID,
+				MinQueryIndex: aclBindingRuleResp2.Index,
+				MaxQueryTime:  10 * time.Second,
+			},
+		}
+		var aclBindingRuleResp3 structs.ACLBindingRulesListResponse
+		err = msgpackrpc.CallWithCodec(codec, structs.ACLListBindingRulesRPCMethod, aclBindingRuleReq3, &aclBindingRuleResp3)
+		resultCh <- &res{err: err, reply: &aclBindingRuleResp3}
+	}(resultCh)
+
+	// Delete an ACL binding rule from state which should return the blocking
+	// query.
+	must.NoError(t, testServer.fsm.State().DeleteACLBindingRules(
+		aclBindingRuleResp2.Index+10, []string{aclBindingRules[0].ID}))
+
+	// Wait until the test within the routine is complete.
+	result := <-resultCh
+	must.NoError(t, result.err)
+	must.Len(t, 1, result.reply.ACLBindingRules)
+	must.NotEq(t, result.reply.ACLBindingRules[0].ID, aclBindingRules[0].ID)
+	must.Greater(t, aclBindingRuleResp2.Index, result.reply.Index)
+}
+
+func TestACL_GetBindingRules(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, aclRootToken, testServerCleanupFn := TestACLServer(t, nil)
+	defer testServerCleanupFn()
+	codec := rpcClient(t, testServer)
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	// Try reading a binding rule without setting a correct auth token.
+	aclBindingRuleReq1 := &structs.ACLBindingRulesRequest{
+		ACLBindingRuleIDs: []string{"nope"},
+		QueryOptions: structs.QueryOptions{
+			Region: DefaultRegion,
+		},
+	}
+	var aclBindingRuleResp1 structs.ACLBindingRulesResponse
+	err := msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRulesRPCMethod, aclBindingRuleReq1, &aclBindingRuleResp1)
+	must.EqError(t, err, "Permission denied")
+	must.MapEmpty(t, aclBindingRuleResp1.ACLBindingRules)
+
+	// Try reading a binding rule that doesn't exist.
+	aclBindingRuleReq2 := &structs.ACLBindingRulesRequest{
+		ACLBindingRuleIDs: []string{"nope"},
+		QueryOptions: structs.QueryOptions{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp2 structs.ACLBindingRulesResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRulesRPCMethod, aclBindingRuleReq2, &aclBindingRuleResp2)
+	must.NoError(t, err)
+	must.MapEmpty(t, aclBindingRuleResp1.ACLBindingRules)
+
+	// Create two ACL binding rules and put these directly into state.
+	aclBindingRules := []*structs.ACLBindingRule{mock.ACLBindingRule(), mock.ACLBindingRule()}
+	must.NoError(t, testServer.State().UpsertACLBindingRules(10, aclBindingRules, true))
+
+	// Try reading both binding rules that are within state.
+	aclBindingRuleReq3 := &structs.ACLBindingRulesRequest{
+		ACLBindingRuleIDs: []string{aclBindingRules[0].ID, aclBindingRules[1].ID},
+		QueryOptions: structs.QueryOptions{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp3 structs.ACLBindingRulesResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRulesRPCMethod, aclBindingRuleReq3, &aclBindingRuleResp3)
+	must.NoError(t, err)
+	must.MapLen(t, 2, aclBindingRuleResp3.ACLBindingRules)
+	must.MapContainsKeys(t, aclBindingRuleResp3.ACLBindingRules, []string{aclBindingRules[0].ID, aclBindingRules[1].ID})
+
+	// Now test a blocking query, where we wait for an update to the set which
+	// is triggered by a deletion.
+	type res struct {
+		err   error
+		reply *structs.ACLBindingRulesResponse
+	}
+	resultCh := make(chan *res)
+
+	go func(resultCh chan *res) {
+		aclBindingRuleReq4 := &structs.ACLBindingRulesRequest{
+			ACLBindingRuleIDs: []string{aclBindingRules[0].ID, aclBindingRules[1].ID},
+			QueryOptions: structs.QueryOptions{
+				Region:        DefaultRegion,
+				AuthToken:     aclRootToken.SecretID,
+				MinQueryIndex: aclBindingRuleResp3.Index,
+				MaxQueryTime:  10 * time.Second,
+			},
+		}
+		var aclBindingRuleResp4 structs.ACLBindingRulesResponse
+		err = msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRulesRPCMethod, aclBindingRuleReq4, &aclBindingRuleResp4)
+		resultCh <- &res{err: err, reply: &aclBindingRuleResp4}
+	}(resultCh)
+
+	// Delete an ACL role from state which should return the blocking query.
+	must.NoError(t, testServer.fsm.State().DeleteACLBindingRules(
+		aclBindingRuleResp3.Index+10, []string{aclBindingRules[0].ID}))
+
+	// Wait for the result and then test it.
+	result := <-resultCh
+	must.NoError(t, result.err)
+	must.MapLen(t, 1, result.reply.ACLBindingRules)
+	must.MapContainsKeys(t, result.reply.ACLBindingRules, []string{aclBindingRules[1].ID})
+	must.Greater(t, aclBindingRuleResp3.Index, result.reply.Index)
+}
+
+func TestACL_GetBindingRule(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, aclRootToken, testServerCleanupFn := TestACLServer(t, nil)
+	defer testServerCleanupFn()
+	codec := rpcClient(t, testServer)
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	// Create two ACL binding rules and put these directly into state.
+	aclBindingRules := []*structs.ACLBindingRule{mock.ACLBindingRule(), mock.ACLBindingRule()}
+	must.NoError(t, testServer.State().UpsertACLBindingRules(10, aclBindingRules, true))
+
+	// Try reading a role without setting a correct auth token.
+	aclBindingRuleReq1 := &structs.ACLBindingRuleRequest{
+		QueryOptions: structs.QueryOptions{
+			Region: DefaultRegion,
+		},
+	}
+	var aclBindingRuleResp1 structs.ACLBindingRuleResponse
+	err := msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRuleRPCMethod, aclBindingRuleReq1, &aclBindingRuleResp1)
+	must.EqError(t, err, "Permission denied")
+
+	// Try reading a role that doesn't exist.
+	aclBindingRuleReq2 := &structs.ACLBindingRuleRequest{
+		ACLBindingRuleID: "nope",
+		QueryOptions: structs.QueryOptions{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp2 structs.ACLBindingRuleResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRuleRPCMethod, aclBindingRuleReq2, &aclBindingRuleResp2)
+	must.NoError(t, err)
+	must.Nil(t, aclBindingRuleResp2.ACLBindingRule)
+
+	// Read both our available ACL roles using a valid auth token.
+	aclBindingRuleReq3 := &structs.ACLBindingRuleRequest{
+		ACLBindingRuleID: aclBindingRules[0].ID,
+		QueryOptions: structs.QueryOptions{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp3 structs.ACLBindingRuleResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRuleRPCMethod, aclBindingRuleReq3, &aclBindingRuleResp3)
+	must.NoError(t, err)
+	must.Eq(t, aclBindingRules[0].ID, aclBindingRuleResp3.ACLBindingRule.ID)
+
+	aclBindingRuleReq4 := &structs.ACLBindingRuleRequest{
+		ACLBindingRuleID: aclBindingRules[1].ID,
+		QueryOptions: structs.QueryOptions{
+			Region:    DefaultRegion,
+			AuthToken: aclRootToken.SecretID,
+		},
+	}
+	var aclBindingRuleResp4 structs.ACLBindingRuleResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRuleRPCMethod, aclBindingRuleReq4, &aclBindingRuleResp4)
+	must.NoError(t, err)
+	must.Eq(t, aclBindingRules[1].ID, aclBindingRuleResp4.ACLBindingRule.ID)
+
+	// Now test a blocking query, where we wait for an update to the set which
+	// is triggered by an upsert.
+	type res struct {
+		err   error
+		reply *structs.ACLBindingRuleResponse
+	}
+	resultCh := make(chan *res)
+
+	go func(resultCh chan *res) {
+		aclBindingRuleReq5 := &structs.ACLBindingRuleRequest{
+			ACLBindingRuleID: aclBindingRules[0].ID,
+			QueryOptions: structs.QueryOptions{
+				Region:        DefaultRegion,
+				AuthToken:     aclRootToken.SecretID,
+				MinQueryIndex: aclBindingRuleResp4.Index,
+				MaxQueryTime:  10 * time.Second,
+			},
+		}
+		var aclBindingRuleResp5 structs.ACLBindingRuleResponse
+		err = msgpackrpc.CallWithCodec(codec, structs.ACLGetBindingRuleRPCMethod, aclBindingRuleReq5, &aclBindingRuleResp5)
+		resultCh <- &res{err: err, reply: &aclBindingRuleResp5}
+	}(resultCh)
+
+	// Delete an ACL role from state which should return the blocking query.
+	aclBindingRule1Copy := aclBindingRules[0].Copy()
+	aclBindingRule1Copy.Description = "updated-description"
+	aclBindingRule1Copy.SetHash()
+
+	must.NoError(t, testServer.fsm.State().UpsertACLBindingRules(
+		aclBindingRuleResp4.Index+10, []*structs.ACLBindingRule{aclBindingRule1Copy}, true))
+
+	// Wait for the result and then test it.
+	result := <-resultCh
+	must.NoError(t, result.err)
+	must.Eq(t, aclBindingRules[0].ID, result.reply.ACLBindingRule.ID)
+	must.Greater(t, aclBindingRuleResp4.Index, result.reply.Index)
+}
+
+func TestACL_OIDCAuthURL(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, _, testServerCleanupFn := TestACLServer(t, nil)
+	defer testServerCleanupFn()
+	codec := rpcClient(t, testServer)
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	// Set up the test OIDC provider.
+	oidcTestProvider := capOIDC.StartTestProvider(t)
+	defer oidcTestProvider.Stop()
+	oidcTestProvider.SetClientCreds("bob", "topsecretcredthing")
+
+	// Send an empty request to ensure the RPC handler runs the validation
+	// func.
+	authURLReq1 := structs.ACLOIDCAuthURLRequest{
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var authURLResp1 structs.ACLOIDCAuthURLResponse
+	err := msgpackrpc.CallWithCodec(codec, structs.ACLOIDCAuthURLRPCMethod, &authURLReq1, &authURLResp1)
+	must.Error(t, err)
+	must.ErrorContains(t, err, "400")
+	must.ErrorContains(t, err, "invalid OIDC auth-url request")
+
+	// Send a valid request that contains an auth method name that does not
+	// exist within state.
+	authURLReq2 := structs.ACLOIDCAuthURLRequest{
+		AuthMethodName: "test-oidc-auth-method",
+		RedirectURI:    "http://127.0.0.1:4649/oidc/callback",
+		ClientNonce:    "fsSPuaodKevKfDU3IeXa",
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var authURLResp2 structs.ACLOIDCAuthURLResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLOIDCAuthURLRPCMethod, &authURLReq2, &authURLResp2)
+	must.Error(t, err)
+	must.ErrorContains(t, err, "400")
+	must.ErrorContains(t, err, "auth-method \"test-oidc-auth-method\" not found")
+
+	// Generate and upsert an ACL auth method for use. Certain values must be
+	// taken from the cap OIDC provider just like real world use.
+	mockedAuthMethod := mock.ACLOIDCAuthMethod()
+	mockedAuthMethod.Config.AllowedRedirectURIs = []string{"http://127.0.0.1:4649/oidc/callback"}
+	mockedAuthMethod.Config.OIDCDiscoveryURL = oidcTestProvider.Addr()
+	mockedAuthMethod.Config.SigningAlgs = []string{"ES256"}
+	mockedAuthMethod.Config.DiscoveryCaPem = []string{oidcTestProvider.CACert()}
+
+	must.NoError(t, testServer.fsm.State().UpsertACLAuthMethods(10, []*structs.ACLAuthMethod{mockedAuthMethod}))
+
+	// Make a new request, which contains all valid data and therefore should
+	// succeed.
+	authURLReq3 := structs.ACLOIDCAuthURLRequest{
+		AuthMethodName: mockedAuthMethod.Name,
+		RedirectURI:    mockedAuthMethod.Config.AllowedRedirectURIs[0],
+		ClientNonce:    "fsSPuaodKevKfDU3IeXa",
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var authURLResp3 structs.ACLOIDCAuthURLResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLOIDCAuthURLRPCMethod, &authURLReq3, &authURLResp3)
+	must.NoError(t, err)
+
+	// The response URL comes encoded, so decode this and check we have each
+	// component we expect.
+	escapedURL, err := url.PathUnescape(authURLResp3.AuthURL)
+	must.NoError(t, err)
+	must.StrContains(t, escapedURL, "/authorize?client_id=mock")
+	must.StrContains(t, escapedURL, "&nonce=fsSPuaodKevKfDU3IeXa")
+	must.StrContains(t, escapedURL, "&redirect_uri=http://127.0.0.1:4649/oidc/callback")
+	must.StrContains(t, escapedURL, "&response_type=code")
+	must.StrContains(t, escapedURL, "&scope=openid")
+	must.StrContains(t, escapedURL, "&state=st_")
+}
+
+func TestACL_OIDCCompleteAuth(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, _, testServerCleanupFn := TestACLServer(t, nil)
+	defer testServerCleanupFn()
+	codec := rpcClient(t, testServer)
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	oidcTestProvider := capOIDC.StartTestProvider(t)
+	defer oidcTestProvider.Stop()
+	oidcTestProvider.SetAllowedRedirectURIs([]string{"http://127.0.0.1:4649/oidc/callback"})
+
+	// Send an empty request to ensure the RPC handler runs the validation
+	// func.
+	completeAuthReq1 := structs.ACLOIDCCompleteAuthRequest{
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp1 structs.ACLLoginResponse
+	err := msgpackrpc.CallWithCodec(codec, structs.ACLOIDCCompleteAuthRPCMethod, &completeAuthReq1, &completeAuthResp1)
+	must.Error(t, err)
+	must.ErrorContains(t, err, "400")
+	must.ErrorContains(t, err, "invalid OIDC complete-auth request")
+
+	// Send a request that passes initial validation. The auth method does not
+	// exist meaning it will fail.
+	completeAuthReq2 := structs.ACLOIDCCompleteAuthRequest{
+		AuthMethodName: "test-oidc-auth-method",
+		ClientNonce:    "fsSPuaodKevKfDU3IeXa",
+		State:          "st_",
+		Code:           "idontknowthisyet",
+		RedirectURI:    "http://127.0.0.1:4649/oidc/callback",
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp2 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLOIDCCompleteAuthRPCMethod, &completeAuthReq2, &completeAuthResp2)
+	must.Error(t, err)
+	must.ErrorContains(t, err, "400")
+	must.ErrorContains(t, err, "auth-method \"test-oidc-auth-method\" not found")
+
+	// Generate and upsert an ACL auth method for use. Certain values must be
+	// taken from the cap OIDC provider and these are validated. Others must
+	// match data we use later, such as the claims.
+	mockedAuthMethod := mock.ACLOIDCAuthMethod()
+	mockedAuthMethod.Config.BoundAudiences = []string{"mock"}
+	mockedAuthMethod.Config.AllowedRedirectURIs = []string{"http://127.0.0.1:4649/oidc/callback"}
+	mockedAuthMethod.Config.OIDCDiscoveryURL = oidcTestProvider.Addr()
+	mockedAuthMethod.Config.SigningAlgs = []string{"ES256"}
+	mockedAuthMethod.Config.DiscoveryCaPem = []string{oidcTestProvider.CACert()}
+	mockedAuthMethod.Config.ClaimMappings = map[string]string{}
+	mockedAuthMethod.Config.ListClaimMappings = map[string]string{
+		"http://nomad.internal/roles":    "roles",
+		"http://nomad.internal/policies": "policies",
+	}
+
+	must.NoError(t, testServer.fsm.State().UpsertACLAuthMethods(10, []*structs.ACLAuthMethod{mockedAuthMethod}))
+
+	// Set our custom data and some expected values, so we can make the RPC and
+	// use the test provider.
+	oidcTestProvider.SetExpectedAuthNonce("fsSPuaodKevKfDU3IeXa")
+	oidcTestProvider.SetExpectedAuthCode("codeABC")
+	oidcTestProvider.SetCustomAudience("mock")
+	oidcTestProvider.SetExpectedState("st_someweirdstateid")
+	oidcTestProvider.SetCustomClaims(map[string]interface{}{
+		"azp":                            "mock",
+		"http://nomad.internal/policies": []string{"engineering"},
+		"http://nomad.internal/roles":    []string{"engineering"},
+	})
+
+	// We should now be able to authenticate, however, we do not have any rule
+	// bindings that will match.
+	completeAuthReq3 := structs.ACLOIDCCompleteAuthRequest{
+		AuthMethodName: mockedAuthMethod.Name,
+		ClientNonce:    "fsSPuaodKevKfDU3IeXa",
+		State:          "st_",
+		Code:           "codeABC",
+		RedirectURI:    mockedAuthMethod.Config.AllowedRedirectURIs[0],
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp3 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLOIDCCompleteAuthRPCMethod, &completeAuthReq3, &completeAuthResp3)
+	must.Error(t, err)
+	must.ErrorContains(t, err, "400")
+	must.ErrorContains(t, err, "no role or policy bindings matched")
+
+	// Upsert an ACL policy and role, so that we can reference this within our
+	// OIDC claims.
+	mockACLPolicy := mock.ACLPolicy()
+	must.NoError(t, testServer.fsm.State().UpsertACLPolicies(
+		structs.MsgTypeTestSetup, 20, []*structs.ACLPolicy{mockACLPolicy}))
+
+	mockACLRole := mock.ACLRole()
+	mockACLRole.Policies = []*structs.ACLRolePolicyLink{{Name: mockACLPolicy.Name}}
+	must.NoError(t, testServer.fsm.State().UpsertACLRoles(
+		structs.MsgTypeTestSetup, 30, []*structs.ACLRole{mockACLRole}, true))
+
+	// Generate and upsert two binding rules, so we can test both ACL Policy
+	// and Role claim mapping.
+	mockBindingRule1 := mock.ACLBindingRule()
+	mockBindingRule1.AuthMethod = mockedAuthMethod.Name
+	mockBindingRule1.BindType = structs.ACLBindingRuleBindTypePolicy
+	mockBindingRule1.Selector = "engineering in list.policies"
+	mockBindingRule1.BindName = mockACLPolicy.Name
+
+	mockBindingRule2 := mock.ACLBindingRule()
+	mockBindingRule2.AuthMethod = mockedAuthMethod.Name
+	mockBindingRule2.BindName = mockACLRole.Name
+
+	must.NoError(t, testServer.fsm.State().UpsertACLBindingRules(
+		40, []*structs.ACLBindingRule{mockBindingRule1, mockBindingRule2}, true))
+
+	completeAuthReq4 := structs.ACLOIDCCompleteAuthRequest{
+		AuthMethodName: mockedAuthMethod.Name,
+		ClientNonce:    "fsSPuaodKevKfDU3IeXa",
+		State:          "st_someweirdstateid",
+		Code:           "codeABC",
+		RedirectURI:    mockedAuthMethod.Config.AllowedRedirectURIs[0],
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp4 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLOIDCCompleteAuthRPCMethod, &completeAuthReq4, &completeAuthResp4)
+	must.NoError(t, err)
+	must.NotNil(t, completeAuthResp4.ACLToken)
+	must.Len(t, 1, completeAuthResp4.ACLToken.Policies)
+	must.Eq(t, mockACLPolicy.Name, completeAuthResp4.ACLToken.Policies[0])
+	must.Len(t, 1, completeAuthResp4.ACLToken.Roles)
+	must.Eq(t, mockACLRole.Name, completeAuthResp4.ACLToken.Roles[0].Name)
+	must.Eq(t, mockACLRole.ID, completeAuthResp4.ACLToken.Roles[0].ID)
+
+	// Create a binding rule which generates management tokens. This should
+	// override the other rules, giving us a management token when we next
+	// log in.
+	mockBindingRule3 := mock.ACLBindingRule()
+	mockBindingRule3.AuthMethod = mockedAuthMethod.Name
+	mockBindingRule3.BindType = structs.ACLBindingRuleBindTypeManagement
+	mockBindingRule3.Selector = "engineering in list.policies"
+	mockBindingRule3.BindName = ""
+
+	must.NoError(t, testServer.fsm.State().UpsertACLBindingRules(
+		50, []*structs.ACLBindingRule{mockBindingRule3}, true))
+
+	completeAuthReq5 := structs.ACLOIDCCompleteAuthRequest{
+		AuthMethodName: mockedAuthMethod.Name,
+		ClientNonce:    "fsSPuaodKevKfDU3IeXa",
+		State:          "st_someweirdstateid",
+		Code:           "codeABC",
+		RedirectURI:    mockedAuthMethod.Config.AllowedRedirectURIs[0],
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp5 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLOIDCCompleteAuthRPCMethod, &completeAuthReq5, &completeAuthResp5)
+	must.NoError(t, err)
+	must.NotNil(t, completeAuthResp4.ACLToken)
+	must.Len(t, 0, completeAuthResp5.ACLToken.Policies)
+	must.Len(t, 0, completeAuthResp5.ACLToken.Roles)
+	must.Eq(t, structs.ACLManagementToken, completeAuthResp5.ACLToken.Type)
+}
+
+func TestACL_Login(t *testing.T) {
+	ci.Parallel(t)
+
+	testServer, _, testServerCleanupFn := TestACLServer(t, nil)
+	defer testServerCleanupFn()
+	codec := rpcClient(t, testServer)
+	testutil.WaitForLeader(t, testServer.RPC)
+
+	// create a sample JWT and a pub key for verification
+	iat := time.Now().Unix()
+	nbf := time.Now().Unix()
+	exp := time.Now().Add(time.Hour).Unix()
+	user := "John"
+	testToken, testPubKey, err := mock.SampleJWTokenWithKeys(jwt.MapClaims{
+		"http://nomad.internal/policies": []string{"engineering"},
+		"http://nomad.internal/roles":    []string{"engineering"},
+		"iat":                            iat,
+		"nbf":                            nbf,
+		"exp":                            exp,
+		"sub":                            user,
+		"iss":                            "nomad test suite",
+		"aud":                            []string{"sales", "engineering"},
+	}, nil)
+	must.Nil(t, err)
+
+	// send empty req to test validation
+	loginReq1 := structs.ACLLoginRequest{
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp1 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLLoginRPCMethod, &loginReq1, &completeAuthResp1)
+	must.ErrorContains(t, err, "missing auth method name")
+	must.ErrorContains(t, err, "missing login token")
+
+	// Send a request that passes initial validation. The auth method does not
+	// exist meaning it will fail.
+	loginReq2 := structs.ACLLoginRequest{
+		AuthMethodName: "test-oidc-auth-method",
+		LoginToken:     testToken,
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp2 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLLoginRPCMethod, &loginReq2, &completeAuthResp2)
+	must.Error(t, err)
+	must.ErrorContains(t, err, "400")
+	must.ErrorContains(t, err, "auth-method \"test-oidc-auth-method\" not found")
+
+	// Generate and upsert a JWT ACL auth method for use.
+	mockedAuthMethod := mock.ACLJWTAuthMethod()
+	mockedAuthMethod.Config.BoundAudiences = []string{"engineering"}
+	mockedAuthMethod.Config.JWTValidationPubKeys = []string{testPubKey}
+	mockedAuthMethod.Config.BoundIssuer = []string{"nomad test suite"}
+	mockedAuthMethod.Config.ExpirationLeeway = time.Duration(3600)
+	mockedAuthMethod.Config.ClockSkewLeeway = time.Duration(3600)
+	mockedAuthMethod.Config.ClaimMappings = map[string]string{
+		"sub": "user",
+	}
+	mockedAuthMethod.Config.ListClaimMappings = map[string]string{
+		"http://nomad.internal/roles":    "roles",
+		"http://nomad.internal/policies": "policies",
+	}
+
+	must.NoError(t, testServer.fsm.State().UpsertACLAuthMethods(10, []*structs.ACLAuthMethod{mockedAuthMethod}))
+
+	// We should now be able to authenticate, however, we do not have any rule
+	// bindings that will match.
+	loginReq3 := structs.ACLLoginRequest{
+		AuthMethodName: mockedAuthMethod.Name,
+		LoginToken:     testToken,
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp3 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLLoginRPCMethod, &loginReq3, &completeAuthResp3)
+	must.Error(t, err)
+	must.ErrorContains(t, err, "400")
+	must.ErrorContains(t, err, "no role or policy bindings matched")
+
+	// Upsert an ACL policy and role, so that we can reference this within our
+	// JWT claims.
+	mockACLPolicy := mock.ACLPolicy()
+	must.NoError(t, testServer.fsm.State().UpsertACLPolicies(
+		structs.MsgTypeTestSetup, 20, []*structs.ACLPolicy{mockACLPolicy}))
+
+	mockACLRole := mock.ACLRole()
+	mockACLRole.Policies = []*structs.ACLRolePolicyLink{{Name: mockACLPolicy.Name}}
+	must.NoError(t, testServer.fsm.State().UpsertACLRoles(
+		structs.MsgTypeTestSetup, 30, []*structs.ACLRole{mockACLRole}, true))
+
+	// Generate and upsert two binding rules, so we can test both ACL Policy
+	// and Role claim mapping.
+	mockBindingRule1 := mock.ACLBindingRule()
+	mockBindingRule1.AuthMethod = mockedAuthMethod.Name
+	mockBindingRule1.BindType = structs.ACLBindingRuleBindTypePolicy
+	mockBindingRule1.Selector = "engineering in list.policies"
+	mockBindingRule1.BindName = mockACLPolicy.Name
+
+	mockBindingRule2 := mock.ACLBindingRule()
+	mockBindingRule2.AuthMethod = mockedAuthMethod.Name
+	mockBindingRule2.BindName = mockACLRole.Name
+
+	must.NoError(t, testServer.fsm.State().UpsertACLBindingRules(
+		40, []*structs.ACLBindingRule{mockBindingRule1, mockBindingRule2}, true))
+
+	loginReq4 := structs.ACLLoginRequest{
+		AuthMethodName: mockedAuthMethod.Name,
+		LoginToken:     testToken,
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp4 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLLoginRPCMethod, &loginReq4, &completeAuthResp4)
+	must.NoError(t, err)
+	must.NotNil(t, completeAuthResp4.ACLToken)
+	must.Len(t, 1, completeAuthResp4.ACLToken.Policies)
+	must.Eq(t, mockACLPolicy.Name, completeAuthResp4.ACLToken.Policies[0])
+	must.Len(t, 1, completeAuthResp4.ACLToken.Roles)
+	must.Eq(t, mockACLRole.Name, completeAuthResp4.ACLToken.Roles[0].Name)
+	must.Eq(t, mockACLRole.ID, completeAuthResp4.ACLToken.Roles[0].ID)
+	must.Eq(t, mockedAuthMethod.Type+"-"+mockedAuthMethod.Name, completeAuthResp4.ACLToken.Name)
+
+	// Create a binding rule which generates management tokens. This should
+	// override the other rules, giving us a management token when we next
+	// log in.
+	mockBindingRule3 := mock.ACLBindingRule()
+	mockBindingRule3.AuthMethod = mockedAuthMethod.Name
+	mockBindingRule3.BindType = structs.ACLBindingRuleBindTypeManagement
+	mockBindingRule3.Selector = "engineering in list.policies"
+	mockBindingRule3.BindName = ""
+
+	must.NoError(t, testServer.fsm.State().UpsertACLBindingRules(
+		50, []*structs.ACLBindingRule{mockBindingRule3}, true))
+
+	loginReq5 := structs.ACLLoginRequest{
+		AuthMethodName: mockedAuthMethod.Name,
+		LoginToken:     testToken,
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp5 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLLoginRPCMethod, &loginReq5, &completeAuthResp5)
+	must.NoError(t, err)
+	must.NotNil(t, completeAuthResp5.ACLToken)
+	must.Len(t, 0, completeAuthResp5.ACLToken.Policies)
+	must.Len(t, 0, completeAuthResp5.ACLToken.Roles)
+	must.Eq(t, structs.ACLManagementToken, completeAuthResp5.ACLToken.Type)
+
+	// Change the token name format
+	mockedAuthMethod.TokenNameFormat = "${auth_method_type}-${auth_method_name}-${value.user}"
+	must.NoError(t, testServer.fsm.State().UpsertACLAuthMethods(60, []*structs.ACLAuthMethod{mockedAuthMethod}))
+
+	loginReq6 := structs.ACLLoginRequest{
+		AuthMethodName: mockedAuthMethod.Name,
+		LoginToken:     testToken,
+		WriteRequest: structs.WriteRequest{
+			Region: DefaultRegion,
+		},
+	}
+
+	var completeAuthResp6 structs.ACLLoginResponse
+	err = msgpackrpc.CallWithCodec(codec, structs.ACLLoginRPCMethod, &loginReq6, &completeAuthResp6)
+	must.NoError(t, err)
+	must.NotNil(t, completeAuthResp6.ACLToken)
+	must.Eq(t, mockedAuthMethod.Type+"-"+mockedAuthMethod.Name+"-"+user, completeAuthResp6.ACLToken.Name)
 }

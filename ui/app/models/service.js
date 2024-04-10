@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) HashiCorp, Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ */
+
 // @ts-check
 import { attr, belongsTo } from '@ember-data/model';
 import Model from '@ember-data/model';
@@ -16,6 +21,7 @@ export default class Service extends Model {
   @attr('number') port;
   @attr('string') serviceName;
   @attr() tags;
+  @attr() canary_tags;
 
   @alias('serviceName') name;
 

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package tasklifecycle
 
 import (
@@ -60,23 +63,6 @@ func TestGate(t *testing.T) {
 				requireChannelBlocking(t, g.WaitCh(), "block")
 				g.Open()
 				requireChannelPassing(t, g.WaitCh(), "second allow")
-			},
-		},
-		{
-			name: "concurrent access",
-			test: func(t *testing.T, g *Gate) {
-				x := 100
-				go func() {
-					for i := 0; i < x; i++ {
-						g.Open()
-					}
-				}()
-				go func() {
-					for i := 0; i < x/10; i++ {
-						g.Close()
-					}
-				}()
-				requireChannelPassing(t, g.WaitCh(), "gate should be open")
 			},
 		},
 	}

@@ -1,3 +1,6 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 variable "name" {
   description = "Used to name various infrastructure components"
   default     = "nomad-e2e"
@@ -15,7 +18,7 @@ variable "availability_zone" {
 
 variable "instance_type" {
   description = "The AWS instance type to use for both clients and servers."
-  default     = "t2.medium"
+  default     = "t3a.medium"
 }
 
 variable "server_count" {
@@ -23,14 +26,14 @@ variable "server_count" {
   default     = "3"
 }
 
-variable "client_count_ubuntu_bionic_amd64" {
+variable "client_count_ubuntu_jammy_amd64" {
   description = "The number of Ubuntu clients to provision."
   default     = "4"
 }
 
 variable "client_count_windows_2016_amd64" {
   description = "The number of windows 2016 clients to provision."
-  default     = "1"
+  default     = "0"
 }
 
 variable "restrict_ingress_cidrblock" {
@@ -50,7 +53,13 @@ variable "nomad_local_binary" {
 
 variable "nomad_license" {
   type        = string
-  description = "If nomad_license is set, deploy a license to override the temporary license"
+  description = "If nomad_license is set, deploy a license"
+  default     = ""
+}
+
+variable "consul_license" {
+  type        = string
+  description = "If consul_license is set, deploy a license"
   default     = ""
 }
 
@@ -89,8 +98,8 @@ variable "nomad_local_binary_server" {
   default     = []
 }
 
-variable "nomad_local_binary_client_ubuntu_bionic_amd64" {
-  description = "A list of nomad local binary paths to deploy to Ubuntu Bionic clients, to override nomad_local_binary"
+variable "nomad_local_binary_client_ubuntu_jammy_amd64" {
+  description = "A list of nomad local binary paths to deploy to Ubuntu Jammy clients, to override nomad_local_binary"
   type        = list(string)
   default     = []
 }

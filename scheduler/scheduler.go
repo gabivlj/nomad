@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package scheduler
 
 import (
@@ -72,6 +75,12 @@ type State interface {
 	// The type of each result is *structs.Node
 	Nodes(ws memdb.WatchSet) (memdb.ResultIterator, error)
 
+	// NodesByNodePool returns an iterator over all nodes in the node pool
+	NodesByNodePool(ws memdb.WatchSet, poolName string) (memdb.ResultIterator, error)
+
+	// NodePoolByName is used to lookup a node by ID.
+	NodePoolByName(ws memdb.WatchSet, poolName string) (*structs.NodePool, error)
+
 	// AllocsByJob returns the allocations by JobID
 	AllocsByJob(ws memdb.WatchSet, namespace, jobID string, all bool) ([]*structs.Allocation, error)
 
@@ -84,7 +93,7 @@ type State interface {
 	// AllocsByNodeTerminal returns all the allocations by node filtering by terminal status
 	AllocsByNodeTerminal(ws memdb.WatchSet, node string, terminal bool) ([]*structs.Allocation, error)
 
-	// GetNodeByID is used to lookup a node by ID
+	// NodeByID is used to lookup a node by ID
 	NodeByID(ws memdb.WatchSet, nodeID string) (*structs.Node, error)
 
 	// GetJobByID is used to lookup a job by ID
@@ -134,8 +143,9 @@ type Planner interface {
 	// that on leader changes, the evaluation will be reblocked properly.
 	ReblockEval(*structs.Evaluation) error
 
-	// ServersMeetMinimumVersion returns whether the Nomad servers are at least on the
-	// given Nomad version. The checkFailedServers parameter specifies whether version
-	// for the failed servers should be verified.
+	// ServersMeetMinimumVersion returns whether the Nomad servers in the
+	// worker's region are at least on the given Nomad version. The
+	// checkFailedServers parameter specifies whether version for the failed
+	// servers should be verified.
 	ServersMeetMinimumVersion(minVersion *version.Version, checkFailedServers bool) bool
 }

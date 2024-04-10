@@ -1,9 +1,6 @@
 name: Core CI Tests
 on:
-  push:
-    branches-ignore:
-      - main
-      - release-**
+  pull_request:
     paths-ignore:
       - 'README.md'
       - 'CHANGELOG.md'
@@ -13,66 +10,86 @@ on:
       - 'demo/**'
       - 'dev/**'
       - 'e2e/terraform/**'
+      - 'e2e/ui/**'
       - 'integrations/**'
       - 'pkg/**'
       - 'scripts/**'
       - 'terraform/**'
       - 'ui/**'
       - 'website/**'
+  push:
+    branches:
+      - main
+      - release/**
+    paths-ignore:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - '.changelog/**'
+      - '.tours/**'
+      - 'contributing/**'
+      - 'demo/**'
+      - 'dev/**'
+      - 'e2e/terraform/**'
+      - 'e2e/ui/**'
+      - 'integrations/**'
+      - 'pkg/**'
+      - 'scripts/**'
+      - 'terraform/**'
+      - 'ui/**'
+      - 'website/**'
+
 env:
   VERBOSE: 1
-  GO_VERSION: 1.19
-  GOBIN: /usr/local/bin
   GOTESTARCH: amd64
-  CONSUL_VERSION: 1.11.3
-  VAULT_VERSION: 1.9.3
+  CONSUL_VERSION: 1.14.4
+  VAULT_VERSION: 1.12.2
   NOMAD_SLOW_TEST: 0
   NOMAD_TEST_LOG_LEVEL: OFF
+
 jobs:
-  checks:
-    runs-on: ubuntu-22.04
+  # this caches dependencies for subsequent jobs, including private deps in enterprise
+  mods:
+    runs-on: ${{ endsWith(github.repository, '-enterprise') && fromJSON('["self-hosted", "ondemand", "linux"]') || 'ubuntu-22.04' }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: ./.github/actions/vault-secrets
         with:
-          fetch-depth: 0 # needs tags for checkproto
-      - uses: magnetikonline/action-golang-cache@v1
-        with:
-          go-version: ${{env.GO_VERSION}}
-          cache-key-suffix: -checks
-      - name: Run make check
+          paths: |-
+            kv/data/github/hashicorp/nomad-enterprise/gha ELEVATED_GITHUB_TOKEN ;
+      - name: Git config token
+        if: endsWith(github.repository, '-enterprise')
+        run: git config --global url.'https://${{ env.ELEVATED_GITHUB_TOKEN }}@github.com'.insteadOf 'https://github.com'
+      - uses: hashicorp/setup-golang@v3
+      - name: Get Go modules
         run: |
-          make missing
           make bootstrap
-          make check
+          make tidy
+  checks:
+    uses: ./.github/workflows/checks.yaml
+    needs: [mods]
   compile:
+    needs: [mods, checks]
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-11, windows-2019]
+        os: [ubuntu-22.04, macos-14, windows-2019]
     runs-on: ${{matrix.os}}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v2
-      - uses: magnetikonline/action-golang-cache@v1
-        with:
-          go-version: ${{env.GO_VERSION}}
-          cache-key-suffix: -compile
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: hashicorp/setup-golang@v3
       - name: Run make dev
-        env:
-          GOBIN: ${{env.GOROOT}}/bin # windows kludge
         run: |
           make bootstrap
           make dev
   tests-api:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    needs: [mods]
+    runs-on: [custom, xl, 22.04]
+    timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v2
-      - uses: magnetikonline/action-golang-cache@v1
-        with:
-          go-version: ${{env.GO_VERSION}}
-          cache-key-suffix: -api
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: hashicorp/setup-golang@v3
       - name: Run API tests
         env:
           GOTEST_MOD: api
@@ -81,72 +98,33 @@ jobs:
           make generate-all
           sudo sed -i 's!Defaults!#Defaults!g' /etc/sudoers
           sudo -E env "PATH=$PATH" make test-nomad-module
-  tests-pkgs:
+  tests-groups:
+    needs: [mods]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        pkg:
-          - acl/...
-          - client
-          - client/allocdir/...
-          - client/allochealth/...
-          - client/allocrunner/...
-          - client/allocwatcher/...
-          - client/config/...
-          - client/consul/...
-          - client/devicemanager/...
-          - client/dynamicplugins/...
-          - client/fingerprint/...
-          - client/interfaces/...
-          - client/lib/...
-          - client/logmon/...
-          - client/pluginmanager/...
-          - client/servers/...
-          - client/serviceregistration/...
-          - client/state/...
-          - client/stats/...
-          - client/structs/...
-          - client/taskenv/...
-          - command
-          - command/agent/...
-          - command/raft_tools/...
-          - drivers/docker/...
-          - drivers/exec/...
-          - drivers/java/...
-          - drivers/mock/...
-          - drivers/rawexec/...
-          - drivers/shared/...
-          - drivers/qemu/...
-          - helper/...
-          - internal/...
-          - jobspec/...
-          - lib/...
+        groups:
           - nomad
-          - nomad/deploymentwatcher/...
-          - nomad/drainer/...
-          - nomad/state/...
-          - nomad/stream/...
-          - nomad/structs/...
-          - nomad/volumewatcher/...
-          - plugins/...
-          - scheduler/...
-          - testutil/...
+          - client
+          - command
+          - drivers
+          - quick
     steps:
-      - uses: actions/checkout@v2
-      - uses: magnetikonline/action-golang-cache@v1
-        with:
-          go-version: ${{env.GO_VERSION}}
-          cache-key-suffix: -pkgs
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: hashicorp/setup-golang@v3
       - name: Run Matrix Tests
         env:
-          GOTEST_PKGS: ./${{matrix.pkg}}
+          GOTEST_GROUP: ${{matrix.groups}}
         run: |
           make bootstrap
           make generate-all
-          hc-install vault ${{env.VAULT_VERSION}}
-          hc-install consul ${{env.CONSUL_VERSION}}
+          make dev
+          hc-install install -version ${{env.VAULT_VERSION}} -path ${{env.GOBIN}} vault
+          hc-install install -version ${{env.CONSUL_VERSION}} -path ${{env.GOBIN}} consul
           sudo sed -i 's!Defaults!#Defaults!g' /etc/sudoers
           sudo -E env "PATH=$PATH" make test-nomad
-
+permissions:
+  contents: read
+  id-token: write

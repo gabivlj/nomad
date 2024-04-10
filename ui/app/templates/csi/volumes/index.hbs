@@ -1,3 +1,8 @@
+{{!
+  Copyright (c) HashiCorp, Inc.
+  SPDX-License-Identifier: BUSL-1.1
+~}}
+
 {{page-title "CSI Volumes"}}
 <StorageSubnav />
 <section class="section">
@@ -38,7 +43,7 @@
         @source={{p.list}}
         @sortProperty={{this.sortProperty}}
         @sortDescending={{this.sortDescending}}
-        @class="with-foot {{if this.keyboard.displayHints "display-hints"}}" as |t|
+        @class="with-foot" as |t|
       >
         <t.head>
           <t.sort-by @prop="name">
@@ -77,13 +82,15 @@
                 action=(action "gotoVolume" row.model)
               }}
             >
-              <LinkTo
-                @route="csi.volumes.volume"
-                @model={{row.model.idWithNamespace}}
-                class="is-primary"
-              >
-                {{row.model.name}}
-              </LinkTo>
+              <Tooltip @text={{row.model.plainId}}>
+                <LinkTo
+                  @route="csi.volumes.volume"
+                  @model={{row.model.idWithNamespace}}
+                  class="is-primary"
+                >
+                  {{row.model.name}}
+                </LinkTo>
+              </Tooltip>
             </td>
             {{#if this.system.shouldShowNamespaces}}
               <td data-test-volume-namespace>

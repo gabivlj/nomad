@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package command
 
 import (
@@ -299,9 +302,12 @@ func (m *monitor) monitor(evalID string) int {
 		meta := new(Meta)
 		meta.Ui = m.ui
 		cmd := &DeploymentStatusCommand{Meta: *meta}
-		status, err := cmd.monitor(m.client, dID, 0, verbose)
+		status, err := cmd.monitor(m.client, dID, 0, m.state.wait, verbose)
 		if err != nil || status != api.DeploymentStatusSuccessful {
 			return 1
+		}
+		if status == api.DeploymentStatusSuccessful {
+			schedFailure = false
 		}
 	}
 

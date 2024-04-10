@@ -1,3 +1,6 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 variable "nodeID" {
   type = string
 }
@@ -33,6 +36,7 @@ job "disconnect-node" {
 
     task "task" {
       driver = "raw_exec"
+      user   = "root"
       config {
         command = "/bin/sh"
         args = ["-c",

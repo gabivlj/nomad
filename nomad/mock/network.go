@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package mock
 
 import (
@@ -16,4 +19,16 @@ func NewNetworkStatus(address string) structs.NetworkStatus {
 
 func (ns *NetworkStatus) NetworkStatus() *structs.AllocNetworkStatus {
 	return &structs.AllocNetworkStatus{Address: ns.address}
+}
+
+func AllocNetworkStatus() *structs.AllocNetworkStatus {
+	return &structs.AllocNetworkStatus{
+		InterfaceName: "eth0",
+		Address:       "192.168.0.100",
+		DNS: &structs.DNSConfig{
+			Servers:  []string{"1.1.1.1"},
+			Searches: []string{"localdomain"},
+			Options:  []string{"ndots:5"},
+		},
+	}
 }

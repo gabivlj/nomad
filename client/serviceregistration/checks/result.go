@@ -1,11 +1,14 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package checks
 
 import (
 	"net/http"
 	"time"
 
-	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/nomad/structs"
+	"golang.org/x/exp/maps"
 )
 
 // GetCheckQuery extracts the needed info from c to actually execute the check.
@@ -23,7 +26,7 @@ func GetCheckQuery(c *structs.ServiceCheck) *Query {
 		Protocol:    protocol,
 		Path:        c.Path,
 		Method:      c.Method,
-		Headers:     helper.CopyMap(c.Header),
+		Headers:     maps.Clone(c.Header),
 		Body:        c.Body,
 	}
 }
@@ -84,17 +87,6 @@ func Stub(
 // AllocationResults is a view of the check_id -> latest result for group and task
 // checks in an allocation.
 type AllocationResults map[structs.CheckID]*structs.CheckQueryResult
-
-// diff returns the set of IDs in ids that are not in m.
-func (m AllocationResults) diff(ids []structs.CheckID) []structs.CheckID {
-	var missing []structs.CheckID
-	for _, id := range ids {
-		if _, exists := m[id]; !exists {
-			missing = append(missing, id)
-		}
-	}
-	return missing
-}
 
 // ClientResults is a holistic view of alloc_id -> check_id -> latest result
 // group and task checks across all allocations on a client.

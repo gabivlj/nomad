@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) HashiCorp, Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ */
+
 /* eslint-disable qunit/require-expect */
 import { module, test } from 'qunit';
 import { setupApplicationTest } from 'ember-qunit';
@@ -13,6 +18,7 @@ import { setupMirage } from 'ember-cli-mirage/test-support';
 import Layout from 'nomad-ui/tests/pages/layout';
 import percySnapshot from '@percy/ember';
 import a11yAudit from 'nomad-ui/tests/helpers/a11y-audit';
+import faker from 'nomad-ui/mirage/faker';
 
 module('Acceptance | keyboard', function (hooks) {
   setupApplicationTest(hooks);
@@ -20,6 +26,7 @@ module('Acceptance | keyboard', function (hooks) {
 
   module('modal', function () {
     test('Opening and closing shortcuts modal with key commands', async function (assert) {
+      faker.seed(1);
       assert.expect(4);
       await visit('/');
       assert.notOk(Layout.keyboard.modalShown);
@@ -111,6 +118,10 @@ module('Acceptance | keyboard', function (hooks) {
         'end up on the clients page after typing g c'
       );
 
+      await triggerEvent('.page-layout', 'keydown', { key: 'Shift' });
+      assert.dom('[data-shortcut="g,c"]').exists('g c shortcut is shown');
+      await triggerEvent('.page-layout', 'keyup', { key: 'Shift' });
+
       triggerEvent('.page-layout', 'keydown', { key: 'g' });
       await triggerEvent('.page-layout', 'keydown', { key: 'j' });
       assert.equal(
@@ -173,6 +184,16 @@ module('Acceptance | keyboard', function (hooks) {
           'text unchanged when I hit escape during recording'
         );
 
+      // when holding shift, the previous "g c" command is now "r o f l"
+      await triggerEvent('.page-layout', 'keydown', { key: 'Shift' });
+      assert
+        .dom('[data-shortcut="g,c"]')
+        .doesNotExist('g c shortcut is no longer shown');
+      assert
+        .dom('[data-shortcut="r,o,f,l"]')
+        .exists('r o f l shortcut is shown in its place');
+      await triggerEvent('.page-layout', 'keyup', { key: 'Shift' });
+
       await click(
         '[data-test-command-label="Go to Clients"] button.reset-to-default'
       );
@@ -181,6 +202,16 @@ module('Acceptance | keyboard', function (hooks) {
           '[data-test-command-label="Go to Clients"] button[data-test-rebinder]'
         )
         .hasText('g c', 'Resetting to default rebinds the shortcut');
+
+      // when holding shift, the now-reset command is back to "g c"
+      await triggerEvent('.page-layout', 'keydown', { key: 'Shift' });
+      assert
+        .dom('[data-shortcut="g,c"]')
+        .exists('g c shortcut is back after reset to default');
+      assert
+        .dom('[data-shortcut="r,o,f,l"]')
+        .doesNotExist('r o f l shortcut is gone after reset to default');
+      await triggerEvent('.page-layout', 'keyup', { key: 'Shift' });
     });
 
     test('Rebound shortcuts persist from localStorage', async function (assert) {
@@ -241,6 +272,7 @@ module('Acceptance | keyboard', function (hooks) {
 
   module('Dynamic Nav', function (dynamicHooks) {
     dynamicHooks.beforeEach(async function () {
+      server.create('node-pool');
       server.create('node');
     });
     test('Dynamic Table Nav', async function (assert) {
@@ -297,6 +329,9 @@ module('Acceptance | keyboard', function (hooks) {
     });
 
     test('Dynamic nav arrows and looping', async function (assert) {
+      // Make sure user is a management token so Variables appears, etc.
+      let token = server.create('token', { type: 'management' });
+      window.localStorage.nomadTokenSecret = token.secretId;
       server.createList('job', 3, { createAllocations: true, type: 'system' });
       const jobID = server.db.jobs.sortBy('modifyIndex').reverse()[0].id;
       await visit(`/jobs/${jobID}@default`);
@@ -304,9 +339,8 @@ module('Acceptance | keyboard', function (hooks) {
       await triggerKeyEvent('.page-layout', 'keydown', 'ArrowRight', {
         shiftKey: true,
       });
-      assert.equal(
-        currentURL(),
-        `/jobs/${jobID}@default/definition`,
+      assert.ok(
+        currentURL().startsWith(`/jobs/${jobID}@default/definition`),
         'Shift+ArrowRight takes you to the next tab (Definition)'
       );
 
@@ -342,6 +376,15 @@ module('Acceptance | keyboard', function (hooks) {
       });
       assert.equal(
         currentURL(),
+        `/jobs/${jobID}@default/clients`,
+        'Shift+ArrowRight takes you to the next tab (Clients)'
+      );
+
+      await triggerKeyEvent('.page-layout', 'keydown', 'ArrowRight', {
+        shiftKey: true,
+      });
+      assert.equal(
+        currentURL(),
         `/jobs/${jobID}@default/services`,
         'Shift+ArrowRight takes you to the next tab (Services)'
       );
@@ -351,8 +394,54 @@ module('Acceptance | keyboard', function (hooks) {
       });
       assert.equal(
         currentURL(),
+        `/jobs/${jobID}@default/variables`,
+        'Shift+ArrowRight takes you to the next tab (Variables)'
+      );
+
+      await triggerKeyEvent('.page-layout', 'keydown', 'ArrowRight', {
+        shiftKey: true,
+      });
+      assert.equal(
+        currentURL(),
         `/jobs/${jobID}@default`,
         'Shift+ArrowRight takes you to the first tab in the loop'
+      );
+      window.localStorage.nomadTokenSecret = null; // Reset Token
+    });
+
+    test('Region switching', async function (assert) {
+      ['Detroit', 'Halifax', 'Phoenix', 'Toronto', 'Windsor'].forEach((id) => {
+        server.create('region', { id });
+      });
+
+      await visit('/jobs');
+
+      // Regions are in the keynav modal
+      await triggerEvent('.page-layout', 'keydown', { key: '?' });
+      await triggerEvent('.page-layout', 'keydown', { key: '?' });
+      assert.ok(Layout.keyboard.modalShown);
+      assert
+        .dom('[data-test-command-label="Switch to Detroit region"]')
+        .exists('First created region is in the modal');
+
+      assert
+        .dom('[data-test-command-label="Switch to Windsor region"]')
+        .exists('Last created region is in the modal');
+
+      // Triggers a region switch to Halifax
+      triggerEvent('.page-layout', 'keydown', { key: 'r' });
+      await triggerEvent('.page-layout', 'keydown', { key: '2' });
+      assert.ok(
+        currentURL().includes('region=Halifax'),
+        'r 2 command takes you to the second region'
+      );
+
+      // Triggers a region switch to Phoenix
+      triggerEvent('.page-layout', 'keydown', { key: 'r' });
+      await triggerEvent('.page-layout', 'keydown', { key: '3' });
+      assert.ok(
+        currentURL().includes('region=Phoenix'),
+        'r 3 command takes you to the third region'
       );
     });
   });

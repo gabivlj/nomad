@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package mock
 
 import (
@@ -26,5 +29,9 @@ func (s *CheckShim) Remove(allocID string, ids []structs.CheckID) error {
 }
 
 func (s *CheckShim) Purge(allocID string) error {
+	return nil
+}
+
+func (s *CheckShim) Snapshot() map[string]string {
 	return nil
 }

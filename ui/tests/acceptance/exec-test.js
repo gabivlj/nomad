@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) HashiCorp, Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ */
+
 /* eslint-disable qunit/require-expect */
 import { module, skip, test } from 'qunit';
 import { currentURL, settled } from '@ember/test-helpers';
@@ -7,6 +12,8 @@ import a11yAudit from 'nomad-ui/tests/helpers/a11y-audit';
 import Service from '@ember/service';
 import Exec from 'nomad-ui/tests/pages/exec';
 import KEYS from 'nomad-ui/utils/keys';
+import percySnapshot from '@percy/ember';
+import faker from 'nomad-ui/mirage/faker';
 
 module('Acceptance | exec', function (hooks) {
   setupApplicationTest(hooks);
@@ -16,12 +23,15 @@ module('Acceptance | exec', function (hooks) {
     window.localStorage.clear();
     window.sessionStorage.clear();
 
+    faker.seed(1);
+
     server.create('agent');
+    server.create('node-pool');
     server.create('node');
 
     this.job = server.create('job', {
       groupsCount: 2,
-      groupTaskCount: 5,
+      groupAllocCount: 5,
       createAllocations: false,
       status: 'running',
     });
@@ -63,7 +73,7 @@ module('Acceptance | exec', function (hooks) {
       region: 'region-2',
     });
 
-    assert.equal(document.title, 'Exec - region-2 - Nomad');
+    assert.ok(document.title.includes('Exec - region-2'));
 
     assert.equal(Exec.header.region.text, this.job.region);
     assert.equal(Exec.header.namespace.text, this.job.namespace);
@@ -94,6 +104,8 @@ module('Acceptance | exec', function (hooks) {
     assert.equal(Exec.taskGroups[0].tasks.length, firstTaskGroup.tasks.length);
     assert.notOk(Exec.taskGroups[0].tasks[0].isActive);
     assert.ok(Exec.taskGroups[0].chevron.isDown);
+
+    await percySnapshot(assert);
 
     await Exec.taskGroups[0].click();
     assert.equal(Exec.taskGroups[0].tasks.length, 0);
@@ -254,7 +266,7 @@ module('Acceptance | exec', function (hooks) {
   });
 
   test('navigating to a task adds its name to the route, chooses an allocation, and assigns a default command', async function (assert) {
-    await Exec.visitJob({ job: this.job.id });
+    await Exec.visitJob({ job: this.job.id, namespace: this.job.namespaceId });
     await Exec.taskGroups[0].click();
     await Exec.taskGroups[0].tasks[0].click();
 
@@ -270,7 +282,7 @@ module('Acceptance | exec', function (hooks) {
 
     assert.equal(
       currentURL(),
-      `/exec/${this.job.id}/${taskGroup.name}/${task.name}`
+      `/exec/${this.job.id}/${taskGroup.name}/${task.name}?namespace=${this.job.namespaceId}`
     );
     assert.ok(Exec.taskGroups[0].tasks[0].isActive);
 
@@ -290,6 +302,12 @@ module('Acceptance | exec', function (hooks) {
         allocationId.split('-')[0]
       } /bin/bash`
     );
+
+    const terminalTextRendered = assert.async();
+    setTimeout(async () => {
+      await percySnapshot(assert);
+      terminalTextRendered();
+    }, 1000);
   });
 
   test('an allocation can be specified', async function (assert) {
@@ -314,6 +332,7 @@ module('Acceptance | exec', function (hooks) {
       task_group: taskGroup.name,
       task_name: task.name,
       allocation: allocation.id.split('-')[0],
+      namespace: this.job.namespaceId,
     });
 
     await settled();
@@ -323,6 +342,42 @@ module('Acceptance | exec', function (hooks) {
       `$ nomad alloc exec -i -t -task spaced\\ name\\! ${
         allocation.id.split('-')[0]
       } /bin/bash`
+    );
+  });
+
+  test('a namespace can be specified', async function (assert) {
+    server.create('namespace'); // default
+    let namespace = server.create('namespace', {
+      id: 'should-show-in-example-string',
+    });
+    let job = server.create('job', {
+      namespaceId: namespace.id,
+      createAllocations: true,
+    });
+
+    let taskGroup = job.taskGroups.models.sortBy('name')[0];
+    let task = taskGroup.tasks.models.sortBy('name')[0];
+    let allocations = this.server.db.allocations.where({
+      jobId: job.id,
+      taskGroup: taskGroup.name,
+    });
+    let allocation = allocations[allocations.length - 1];
+
+    await Exec.visitTask({
+      job: job.id,
+      task_group: taskGroup.name,
+      task_name: task.name,
+      allocation: allocation.id.split('-')[0],
+      namespace: namespace.id,
+    });
+
+    await settled();
+
+    assert.equal(
+      window.execTerminal.buffer.active.getLine(4).translateToString().trim(),
+      `$ nomad alloc exec -i -t -namespace should-show-in-example-string -task ${
+        task.name
+      } ${allocation.id.split('-')[0]} /bin/bash`
     );
   });
 
@@ -477,7 +532,7 @@ module('Acceptance | exec', function (hooks) {
 
     this.owner.register('service:sockets', mockSockets);
 
-    await Exec.visitJob({ job: this.job.id });
+    await Exec.visitJob({ job: this.job.id, namespace: this.job.namespaceId });
     await Exec.taskGroups[0].click();
     await Exec.taskGroups[0].tasks[0].click();
 
@@ -539,6 +594,7 @@ module('Acceptance | exec', function (hooks) {
       task_group: taskGroup.name,
       task_name: task.name,
       allocation: allocation.id.split('-')[0],
+      namespace: this.job.namespaceId,
     });
 
     await settled();

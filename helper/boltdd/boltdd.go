@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 // Package boltdd contains a wrapper around BBoltDB to deduplicate writes and encode
 // values using mgspack.  (dd stands for de-duplicate)
 package boltdd
@@ -8,7 +11,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/hashicorp/go-msgpack/codec"
+	"github.com/hashicorp/go-msgpack/v2/codec"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"go.etcd.io/bbolt"
 	"golang.org/x/crypto/blake2b"

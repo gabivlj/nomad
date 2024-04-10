@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package boltdd
 
 import (
@@ -6,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hashicorp/go-msgpack/codec"
+	"github.com/hashicorp/go-msgpack/v2/codec"
 	"github.com/hashicorp/nomad/ci"
 	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/structs"
@@ -202,7 +205,7 @@ func TestBucket_DedupeWrites(t *testing.T) {
 
 	// Assert there was at least 1 write
 	origWrites := db.BoltDB().Stats().TxStats.Write
-	must.Greater(t, origWrites, 0)
+	must.Positive(t, origWrites)
 
 	// Write the same values again and expect no new writes
 	must.NoError(t, db.Update(func(tx *Tx) error {

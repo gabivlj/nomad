@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) HashiCorp, Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ */
+
 import {
   attribute,
   create,
@@ -61,6 +66,22 @@ export default create({
         scope: '[data-test-header-vault-link]',
         text: text(),
         link: property('href'),
+      },
+
+      signInLink: {
+        scope: '[data-test-header-signin-link]',
+        text: text(),
+        link: property('href'),
+      },
+
+      profileDropdown: {
+        scope: '[data-test-header-profile-dropdown]',
+        text: text(),
+        open: clickable(),
+        options: collection('.dropdown-label', {
+          label: text(),
+          choose: clickable(),
+        }),
       },
     },
   },

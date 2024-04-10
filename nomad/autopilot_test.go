@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package nomad
 
 import (
@@ -11,6 +14,7 @@ import (
 	"github.com/shoenig/test/must"
 
 	"github.com/hashicorp/nomad/ci"
+	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/testutil"
 )
 
@@ -190,6 +194,42 @@ func TestAutopilot_RollingUpdate(t *testing.T) {
 	waitForStableLeadership(t, servers)
 }
 
+func TestAutopilot_MultiRegion(t *testing.T) {
+	ci.Parallel(t)
+
+	conf := func(c *Config) {
+		c.NumSchedulers = 0 // reduces test log noise
+		c.BootstrapExpect = 3
+	}
+	s1, cleanupS1 := TestServer(t, conf)
+	defer cleanupS1()
+
+	s2, cleanupS2 := TestServer(t, conf)
+	defer cleanupS2()
+
+	s3, cleanupS3 := TestServer(t, conf)
+	defer cleanupS3()
+
+	// federated regions should not be considered raft peers or show up in the
+	// known servers list
+	s4, cleanupS4 := TestServer(t, func(c *Config) {
+		c.BootstrapExpect = 0
+		c.Region = "other"
+	})
+	defer cleanupS4()
+
+	servers := []*Server{s1, s2, s3}
+	TestJoin(t, s1, s2, s3, s4)
+
+	t.Logf("waiting for initial stable cluster")
+	waitForStableLeadership(t, servers)
+
+	apDelegate := &AutopilotDelegate{s3}
+	known := apDelegate.KnownServers()
+	must.Eq(t, 3, len(known))
+
+}
+
 func TestAutopilot_CleanupStaleRaftServer(t *testing.T) {
 	ci.Parallel(t)
 
@@ -267,5 +307,42 @@ func TestAutopilot_PromoteNonVoter(t *testing.T) {
 		}
 		return true, nil
 	}, func(err error) { must.NoError(t, err) })
+}
 
+func TestAutopilot_ReturnAutopilotHealth(t *testing.T) {
+	ci.Parallel(t)
+	s1, cleanupS1 := TestServer(t, func(c *Config) {
+		c.BootstrapExpect = 2
+		c.RaftConfig.ProtocolVersion = 3
+		c.AutopilotConfig.EnableCustomUpgrades = true
+		c.UpgradeVersion = "0.0.1"
+		c.NumSchedulers = 0 // reduce log noise
+	})
+	defer cleanupS1()
+
+	s2, cleanupS2 := TestServer(t, func(c *Config) {
+		c.BootstrapExpect = 2
+		c.RaftConfig.ProtocolVersion = 3
+		c.AutopilotConfig.EnableCustomUpgrades = true
+		c.UpgradeVersion = "0.0.1"
+		c.NumSchedulers = 0 // reduce log noise
+	})
+	defer cleanupS2()
+
+	TestJoin(t, s1, s2)
+	servers := []*Server{s1, s2}
+	leader := waitForStableLeadership(t, servers)
+
+	get := &structs.GenericRequest{
+		QueryOptions: structs.QueryOptions{
+			Region: "global",
+		},
+	}
+	reply := &structs.OperatorHealthReply{}
+	err := s1.RPC("Operator.ServerHealth", get, reply)
+	must.NoError(t, err)
+
+	must.Eq(t, reply.Healthy, true)
+	_, leaderID := leader.raft.LeaderWithID()
+	must.Eq(t, reply.Leader, string(leaderID))
 }

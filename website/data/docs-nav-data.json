@@ -59,15 +59,33 @@
       },
       {
         "title": "Consul",
-        "path": "integrations/consul-integration"
+        "routes": [
+          {
+            "title": "Overview",
+            "path": "integrations/consul"
+          },
+          {
+            "title": "ACL",
+            "path": "integrations/consul/acl"
+          },
+          {
+            "title": "Service Mesh",
+            "path": "integrations/consul/service-mesh"
+          }
+        ]
       },
       {
-        "title": "Consul Service Mesh",
-        "path": "integrations/consul-connect"
-      },
-      {
-        "title": "Vault Integration",
-        "path": "integrations/vault-integration"
+        "title": "Vault",
+        "routes": [
+          {
+            "title": "Overview",
+            "path": "integrations/vault"
+          },
+          {
+            "title": "ACL",
+            "path": "integrations/vault/acl"
+          }
+        ]
       }
     ]
   },
@@ -82,8 +100,16 @@
         "path": "concepts"
       },
       {
+        "title": "ACL",
+        "path": "concepts/acl"
+      },
+      {
         "title": "Architecture",
         "path": "concepts/architecture"
+      },
+      {
+        "title": "CPU",
+        "path": "concepts/cpu"
       },
       {
         "title": "Plugins",
@@ -107,6 +133,10 @@
           {
             "title": "Storage",
             "path": "concepts/plugins/csi"
+          },
+          {
+            "title": "Networking",
+            "path": "concepts/plugins/cni"
           }
         ]
       },
@@ -120,6 +150,10 @@
           {
             "title": "Concepts",
             "path": "concepts/scheduling/scheduling"
+          },
+          {
+            "title": "Placement",
+            "path": "concepts/scheduling/placement"
           },
           {
             "title": "Preemption",
@@ -138,6 +172,10 @@
       {
         "title": "Gossip Protocol",
         "path": "concepts/gossip"
+      },
+      {
+        "title": "Node Pools",
+        "path": "concepts/node-pools"
       },
       {
         "title": "Security Model",
@@ -183,6 +221,10 @@
       {
         "title": "plugin",
         "path": "configuration/plugin"
+      },
+      {
+        "title": "reporting",
+        "path": "configuration/reporting"
       },
       {
         "title": "sentinel",
@@ -235,6 +277,56 @@
           {
             "title": "bootstrap",
             "path": "commands/acl/bootstrap"
+          },
+          {
+            "title": "auth-method",
+            "routes": [
+              {
+                "title": "create",
+                "path": "commands/acl/auth-method/create"
+              },
+              {
+                "title": "delete",
+                "path": "commands/acl/auth-method/delete"
+              },
+              {
+                "title": "info",
+                "path": "commands/acl/auth-method/info"
+              },
+              {
+                "title": "list",
+                "path": "commands/acl/auth-method/list"
+              },
+              {
+                "title": "update",
+                "path": "commands/acl/auth-method/update"
+              }
+            ]
+          },
+          {
+            "title": "binding-rule",
+            "routes": [
+              {
+                "title": "create",
+                "path": "commands/acl/binding-rule/create"
+              },
+              {
+                "title": "delete",
+                "path": "commands/acl/binding-rule/delete"
+              },
+              {
+                "title": "info",
+                "path": "commands/acl/binding-rule/info"
+              },
+              {
+                "title": "list",
+                "path": "commands/acl/binding-rule/list"
+              },
+              {
+                "title": "update",
+                "path": "commands/acl/binding-rule/update"
+              }
+            ]
           },
           {
             "title": "policy",
@@ -327,6 +419,10 @@
           {
             "title": "Overview",
             "path": "commands/alloc"
+          },
+          {
+            "title": "checks",
+            "path": "commands/alloc/checks"
           },
           {
             "title": "exec",
@@ -430,11 +526,19 @@
         ]
       },
       {
+        "title": "fmt",
+        "path": "commands/fmt"
+      },
+      {
         "title": "job",
         "routes": [
           {
             "title": "Overview",
             "path": "commands/job"
+          },
+          {
+            "title": "action",
+            "path": "commands/job/action"
           },
           {
             "title": "allocs",
@@ -477,6 +581,10 @@
             "path": "commands/job/promote"
           },
           {
+            "title": "restart",
+            "path": "commands/job/restart"
+          },
+          {
             "title": "revert",
             "path": "commands/job/revert"
           },
@@ -516,8 +624,16 @@
           {
             "title": "get",
             "path": "commands/license/get"
+          },
+          {
+            "title": "inspect",
+            "path": "commands/license/inspect"
           }
         ]
+      },
+      {
+        "title": "login",
+        "path": "commands/login"
       },
       {
         "title": "monitor",
@@ -572,8 +688,62 @@
             "path": "commands/node/eligibility"
           },
           {
+            "title": "meta",
+            "routes": [
+              {
+                "title": "Overview",
+                "path": "commands/node/meta"
+              },
+              {
+                "title": "apply",
+                "path": "commands/node/meta/apply"
+              },
+              {
+                "title": "read",
+                "path": "commands/node/meta/read"
+              }
+            ]
+          },
+          {
             "title": "status",
             "path": "commands/node/status"
+          }
+        ]
+      },
+      {
+        "title": "node pool",
+        "routes": [
+          {
+            "title": "Overview",
+            "path": "commands/node-pool"
+          },
+          {
+            "title": "apply",
+            "path": "commands/node-pool/apply"
+          },
+          {
+            "title": "delete",
+            "path": "commands/node-pool/delete"
+          },
+          {
+            "title": "info",
+            "path": "commands/node-pool/info"
+          },
+          {
+            "title": "init",
+            "path": "commands/node-pool/init"
+          },
+          {
+            "title": "jobs",
+            "path": "commands/node-pool/jobs"
+          },
+          {
+            "title": "list",
+            "path": "commands/node-pool/list"
+          },
+          {
+            "title": "nodes",
+            "path": "commands/node-pool/nodes"
           }
         ]
       },
@@ -598,8 +768,16 @@
               {
                 "title": "set-config",
                 "path": "commands/operator/autopilot/set-config"
+              },
+              {
+                "title": "health",
+                "path": "commands/operator/autopilot/health"
               }
             ]
+          },
+          {
+            "title": "client-state",
+            "path": "commands/operator/client-state"
           },
           {
             "title": "debug",
@@ -631,14 +809,6 @@
             ]
           },
           {
-            "title": "keygen",
-            "path": "commands/operator/keygen"
-          },
-          {
-            "title": "keyring",
-            "path": "commands/operator/keyring"
-          },
-          {
             "title": "metrics",
             "path": "commands/operator/metrics"
           },
@@ -664,16 +834,16 @@
               {
                 "title": "state",
                 "path": "commands/operator/raft/state"
+              },
+              {
+                "title": "transfer-leadership",
+                "path": "commands/operator/raft/transfer-leadership"
               }
             ]
           },
           {
             "title": "root",
             "routes": [
-              {
-                "title": "keyring install",
-                "path": "commands/operator/root/keyring-install"
-              },
               {
                 "title": "keyring list",
                 "path": "commands/operator/root/keyring-list"
@@ -800,6 +970,23 @@
         ]
       },
       {
+        "title": "setup",
+        "routes": [
+          {
+            "title": "Overview",
+            "path": "commands/setup"
+          },
+          {
+            "title": "consul",
+            "path": "commands/setup/consul"
+          },
+          {
+            "title": "vault",
+            "path": "commands/setup/vault"
+          }
+        ]
+      },
+      {
         "title": "scaling",
         "routes": [
           {
@@ -905,8 +1092,66 @@
         ]
       },
       {
+        "title": "tls",
+        "routes": [
+          {
+            "title": "Overview",
+            "path": "commands/tls"
+          },
+          {
+            "title": "ca create",
+            "path": "commands/tls/ca-create"
+          },
+          {
+            "title": "ca info",
+            "path": "commands/tls/ca-info"
+          },
+          {
+            "title": "cert create",
+            "path": "commands/tls/cert-create"
+          },
+          {
+            "title": "cert info",
+            "path": "commands/tls/cert-info"
+          }
+        ]
+      },
+      {
         "title": "ui",
         "path": "commands/ui"
+      },
+      {
+        "title": "var",
+        "routes": [
+          {
+            "title": "Overview",
+            "path": "commands/var"
+          },
+          {
+            "title": "get",
+            "path": "commands/var/get"
+          },
+          {
+            "title": "init",
+            "path": "commands/var/init"
+          },
+          {
+            "title": "list",
+            "path": "commands/var/list"
+          },
+          {
+            "title": "put",
+            "path": "commands/var/put"
+          },
+          {
+            "title": "lock",
+            "path": "commands/var/lock"
+          },
+          {
+            "title": "purge",
+            "path": "commands/var/purge"
+          }
+        ]
       },
       {
         "title": "version",
@@ -962,6 +1207,10 @@
         ]
       }
     ]
+  },
+  {
+    "title": "Glossary",
+    "path": "glossary"
   },
   {
     "divider": true
@@ -1118,7 +1367,12 @@
                   },
                   {
                     "title": "rsadecrypt",
-                    "path": "job-specification/hcl2/functions/crypto/rsadecrypt"
+                    "path": "job-specification/hcl2/functions/crypto/rsadecrypt",
+                    "badge": {
+                      "text": "Deprecated",
+                      "type": "outlined",
+                      "color": "neutral"
+                    }
                   },
                   {
                     "title": "sha1",
@@ -1390,6 +1644,10 @@
         ]
       },
       {
+        "title": "action",
+        "path": "job-specification/action"
+      },
+      {
         "title": "artifact",
         "path": "job-specification/artifact"
       },
@@ -1412,6 +1670,10 @@
       {
         "title": "connect",
         "path": "job-specification/connect"
+      },
+      {
+        "title": "consul",
+        "path": "job-specification/consul"
       },
       {
         "title": "constraint",
@@ -1442,12 +1704,20 @@
         "path": "job-specification/expose"
       },
       {
+        "title": "disconnect",
+        "path": "job-specification/disconnect"
+      },
+      {
         "title": "gateway",
         "path": "job-specification/gateway"
       },
       {
         "title": "group",
         "path": "job-specification/group"
+      },
+      {
+        "title": "identity",
+        "path": "job-specification/identity"
       },
       {
         "title": "job",
@@ -1476,6 +1746,10 @@
       {
         "title": "network",
         "path": "job-specification/network"
+      },
+      {
+        "title": "numa",
+        "path": "job-specification/numa"
       },
       {
         "title": "parameterized",
@@ -1563,6 +1837,18 @@
         "path": "other-specifications/acl-policy"
       },
       {
+        "title": "Namespace",
+        "path": "other-specifications/namespace"
+      },
+      {
+        "title": "Node Pool",
+        "path": "other-specifications/node-pool"
+      },
+      {
+        "title": "Variables",
+        "path": "other-specifications/variables"
+      },
+      {
         "title": "Volume",
         "routes": [
           {
@@ -1628,6 +1914,10 @@
             "href": "/plugins/drivers/community/containerd"
           },
           {
+            "title": "Pledge",
+            "href": "/plugins/drivers/community/pledge"
+          },
+          {
             "title": "Firecracker driver",
             "href": "/plugins/drivers/community/firecracker-task-driver"
           },
@@ -1648,7 +1938,12 @@
             "href": "/plugins/drivers/community/pot"
           },
           {
-            "title": "Rkt <sup>Deprecated</sup> ",
+            "title": "Rkt",
+            "badge": {
+              "text": "Deprecated",
+              "type": "outlined",
+              "color": "neutral"
+            },
             "href": "/plugins/drivers/community/rkt"
           },
           {
@@ -1666,6 +1961,10 @@
           {
             "title": "Windows IIS",
             "href": "/plugins/drivers/community/iis"
+          },
+          {
+            "title": "Windows IIS",
+            "href": "/plugins/drivers/community/nomad-iis"
           }
         ]
       },
@@ -1703,7 +2002,12 @@
             "href": "/plugins/devices/nvidia"
           },
           {
-            "title": "USB <sup>Beta</sup>",
+            "title": "USB",
+            "badge": {
+              "text": "Beta",
+              "type": "outlined",
+              "color": "neutral"
+            },
             "href": "/plugins/devices/community/usb"
           }
         ]
@@ -1728,6 +2032,27 @@
       {
         "title": "Variable Interpolation",
         "path": "runtime/interpolation"
+      }
+    ]
+  },
+  {
+    "title": "Networking",
+    "routes": [
+      {
+        "title": "Overview",
+        "path": "networking"
+      },
+      {
+        "title": "Service Discovery",
+        "path": "networking/service-discovery"
+      },
+      {
+        "title": "Service Mesh",
+        "path": "networking/service-mesh"
+      },
+      {
+        "title": "CNI",
+        "path": "networking/cni"
       }
     ]
   },
@@ -1981,6 +2306,10 @@
       {
         "title": "Key Management",
         "path": "operations/key-management"
+      },
+      {
+        "title": "Considerations for Stateful Workloads",
+        "path": "operations/stateful-workloads"
       }
     ]
   },
@@ -2031,10 +2360,18 @@
             "path": "enterprise/license"
           },
           {
+            "title": "Automated license utilization reporting",
+            "path": "enterprise/license/utilization-reporting"
+          },
+          {
             "title": "FAQ",
             "path": "enterprise/license/faq"
           }
         ]
+      },
+      {
+        "title": "Sentinel",
+        "path": "enterprise/sentinel"
       }
     ]
   },

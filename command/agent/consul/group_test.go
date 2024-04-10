@@ -1,7 +1,10 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package consul
 
 import (
-	"io/ioutil"
+	"io"
 	"testing"
 	"time"
 
@@ -20,11 +23,11 @@ func TestConsul_Connect(t *testing.T) {
 
 	// Create an embedded Consul server
 	testconsul, err := testutil.NewTestServerConfigT(t, func(c *testutil.TestServerConfig) {
-		c.Peering = nil  // fix for older versions of Consul (<1.13.0) that don't support peering
+		c.Peering = nil // fix for older versions of Consul (<1.13.0) that don't support peering
 		// If -v wasn't specified squelch consul logging
 		if !testing.Verbose() {
-			c.Stdout = ioutil.Discard
-			c.Stderr = ioutil.Discard
+			c.Stdout = io.Discard
+			c.Stderr = io.Discard
 		}
 	})
 	if err != nil {
@@ -125,7 +128,7 @@ func TestConsul_Connect(t *testing.T) {
 		require.Equal(t, connectService.Proxy.Config, map[string]interface{}{
 			"bind_address":     "0.0.0.0",
 			"bind_port":        float64(9998),
-			"envoy_stats_tags": []interface{}{"nomad.alloc_id=" + alloc.ID},
+			"envoy_stats_tags": []interface{}{"nomad.alloc_id=" + alloc.ID, "nomad.group=" + alloc.TaskGroup},
 		})
 		require.Equal(t, alloc.ID, agentService.Meta["alloc_id"])
 

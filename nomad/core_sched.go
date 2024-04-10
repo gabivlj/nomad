@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package nomad
 
 import (
@@ -96,7 +99,7 @@ func (c *CoreScheduler) forceGC(eval *structs.Evaluation) error {
 	if err := c.expiredACLTokenGC(eval, true); err != nil {
 		return err
 	}
-	if err := c.rootKeyRotateOrGC(eval); err != nil {
+	if err := c.rootKeyGC(eval); err != nil {
 		return err
 	}
 	// Node GC must occur after the others to ensure the allocations are
@@ -180,7 +183,7 @@ OUTER:
 // jobReap contacts the leader and issues a reap on the passed jobs
 func (c *CoreScheduler) jobReap(jobs []*structs.Job, leaderACL string) error {
 	// Call to the leader to issue the reap
-	for _, req := range c.partitionJobReap(jobs, leaderACL) {
+	for _, req := range c.partitionJobReap(jobs, leaderACL, structs.MaxUUIDsPerWriteRequest) {
 		var resp structs.JobBatchDeregisterResponse
 		if err := c.srv.RPC("Job.BatchDeregister", req, &resp); err != nil {
 			c.logger.Error("batch job reap failed", "error", err)
@@ -194,7 +197,7 @@ func (c *CoreScheduler) jobReap(jobs []*structs.Job, leaderACL string) error {
 // partitionJobReap returns a list of JobBatchDeregisterRequests to make,
 // ensuring a single request does not contain too many jobs. This is necessary
 // to ensure that the Raft transaction does not become too large.
-func (c *CoreScheduler) partitionJobReap(jobs []*structs.Job, leaderACL string) []*structs.JobBatchDeregisterRequest {
+func (c *CoreScheduler) partitionJobReap(jobs []*structs.Job, leaderACL string, batchSize int) []*structs.JobBatchDeregisterRequest {
 	option := &structs.JobDeregisterOptions{Purge: true}
 	var requests []*structs.JobBatchDeregisterRequest
 	submittedJobs := 0
@@ -207,7 +210,7 @@ func (c *CoreScheduler) partitionJobReap(jobs []*structs.Job, leaderACL string) 
 			},
 		}
 		requests = append(requests, req)
-		available := structs.MaxUUIDsPerWriteRequest
+		available := batchSize
 
 		if remaining := len(jobs) - submittedJobs; remaining > 0 {
 			if remaining <= available {
@@ -240,15 +243,20 @@ func (c *CoreScheduler) evalGC(eval *structs.Evaluation) error {
 
 	oldThreshold := c.getThreshold(eval, "eval",
 		"eval_gc_threshold", c.srv.config.EvalGCThreshold)
+	batchOldThreshold := c.getThreshold(eval, "eval",
+		"batch_eval_gc_threshold", c.srv.config.BatchEvalGCThreshold)
 
 	// Collect the allocations and evaluations to GC
 	var gcAlloc, gcEval []string
 	for raw := iter.Next(); raw != nil; raw = iter.Next() {
 		eval := raw.(*structs.Evaluation)
 
-		// The Evaluation GC should not handle batch jobs since those need to be
-		// garbage collected in one shot
-		gc, allocs, err := c.gcEval(eval, oldThreshold, false)
+		gcThreshold := oldThreshold
+		if eval.Type == structs.JobTypeBatch {
+			gcThreshold = batchOldThreshold
+		}
+
+		gc, allocs, err := c.gcEval(eval, gcThreshold, false)
 		if err != nil {
 			return err
 		}
@@ -299,33 +307,26 @@ func (c *CoreScheduler) gcEval(eval *structs.Evaluation, thresholdIndex uint64, 
 	}
 
 	// If the eval is from a running "batch" job we don't want to garbage
-	// collect its allocations. If there is a long running batch job and its
-	// terminal allocations get GC'd the scheduler would re-run the
-	// allocations.
+	// collect its most current allocations. If there is a long running batch job and its
+	// terminal allocations get GC'd the scheduler would re-run the allocations. However,
+	// we do want to GC old Evals and Allocs if there are newer ones due to update.
+	//
+	// The age of the evaluation must also reach the threshold configured to be GCed so that
+	// one may debug old evaluations and referenced allocations.
 	if eval.Type == structs.JobTypeBatch {
 		// Check if the job is running
 
-		// Can collect if:
-		// Job doesn't exist
-		// Job is Stopped and dead
-		// allowBatch and the job is dead
-		collect := false
-		if job == nil {
-			collect = true
-		} else if job.Status != structs.JobStatusDead {
-			collect = false
-		} else if job.Stop {
-			collect = true
-		} else if allowBatch {
-			collect = true
-		}
-
-		// We don't want to gc anything related to a job which is not dead
-		// If the batch job doesn't exist we can GC it regardless of allowBatch
+		// Can collect if either holds:
+		//   - Job doesn't exist
+		//   - Job is Stopped and dead
+		//   - allowBatch and the job is dead
+		//
+		// If we cannot collect outright, check if a partial GC may occur
+		collect := job == nil || job.Status == structs.JobStatusDead && (job.Stop || allowBatch)
 		if !collect {
-			// Find allocs associated with older (based on createindex) and GC them if terminal
-			oldAllocs := olderVersionTerminalAllocs(allocs, job)
-			return false, oldAllocs, nil
+			oldAllocs := olderVersionTerminalAllocs(allocs, job, thresholdIndex)
+			gcEval := (len(oldAllocs) == len(allocs))
+			return gcEval, oldAllocs, nil
 		}
 	}
 
@@ -346,12 +347,12 @@ func (c *CoreScheduler) gcEval(eval *structs.Evaluation, thresholdIndex uint64, 
 	return gcEval, gcAllocIDs, nil
 }
 
-// olderVersionTerminalAllocs returns terminal allocations whose job create index
-// is older than the job's create index
-func olderVersionTerminalAllocs(allocs []*structs.Allocation, job *structs.Job) []string {
+// olderVersionTerminalAllocs returns a list of terminal allocations that belong to the evaluation and may be
+// GCed.
+func olderVersionTerminalAllocs(allocs []*structs.Allocation, job *structs.Job, thresholdIndex uint64) []string {
 	var ret []string
 	for _, alloc := range allocs {
-		if alloc.Job != nil && alloc.Job.CreateIndex < job.CreateIndex && alloc.TerminalStatus() {
+		if alloc.CreateIndex < job.JobModifyIndex && alloc.ModifyIndex < thresholdIndex && alloc.TerminalStatus() {
 			ret = append(ret, alloc.ID)
 		}
 	}
@@ -362,7 +363,7 @@ func olderVersionTerminalAllocs(allocs []*structs.Allocation, job *structs.Job) 
 // allocs.
 func (c *CoreScheduler) evalReap(evals, allocs []string) error {
 	// Call to the leader to issue the reap
-	for _, req := range c.partitionEvalReap(evals, allocs) {
+	for _, req := range c.partitionEvalReap(evals, allocs, structs.MaxUUIDsPerWriteRequest) {
 		var resp structs.GenericResponse
 		if err := c.srv.RPC("Eval.Reap", req, &resp); err != nil {
 			c.logger.Error("eval reap failed", "error", err)
@@ -376,7 +377,7 @@ func (c *CoreScheduler) evalReap(evals, allocs []string) error {
 // partitionEvalReap returns a list of EvalReapRequest to make, ensuring a single
 // request does not contain too many allocations and evaluations. This is
 // necessary to ensure that the Raft transaction does not become too large.
-func (c *CoreScheduler) partitionEvalReap(evals, allocs []string) []*structs.EvalReapRequest {
+func (c *CoreScheduler) partitionEvalReap(evals, allocs []string, batchSize int) []*structs.EvalReapRequest {
 	var requests []*structs.EvalReapRequest
 	submittedEvals, submittedAllocs := 0, 0
 	for submittedEvals != len(evals) || submittedAllocs != len(allocs) {
@@ -386,7 +387,7 @@ func (c *CoreScheduler) partitionEvalReap(evals, allocs []string) []*structs.Eva
 			},
 		}
 		requests = append(requests, req)
-		available := structs.MaxUUIDsPerWriteRequest
+		available := batchSize
 
 		// Add the allocs first
 		if remaining := len(allocs) - submittedAllocs; remaining > 0 {
@@ -479,7 +480,7 @@ OUTER:
 func (c *CoreScheduler) nodeReap(eval *structs.Evaluation, nodeIDs []string) error {
 	// For old clusters, send single deregistration messages COMPAT(0.11)
 	minVersionBatchNodeDeregister := version.Must(version.NewVersion("0.9.4"))
-	if !ServersMeetMinimumVersion(c.srv.Members(), minVersionBatchNodeDeregister, true) {
+	if !ServersMeetMinimumVersion(c.srv.Members(), c.srv.Region(), minVersionBatchNodeDeregister, true) {
 		for _, id := range nodeIDs {
 			req := structs.NodeDeregisterRequest{
 				NodeID: id,
@@ -574,7 +575,7 @@ OUTER:
 // deployments.
 func (c *CoreScheduler) deploymentReap(deployments []string) error {
 	// Call to the leader to issue the reap
-	for _, req := range c.partitionDeploymentReap(deployments) {
+	for _, req := range c.partitionDeploymentReap(deployments, structs.MaxUUIDsPerWriteRequest) {
 		var resp structs.GenericResponse
 		if err := c.srv.RPC("Deployment.Reap", req, &resp); err != nil {
 			c.logger.Error("deployment reap failed", "error", err)
@@ -588,7 +589,7 @@ func (c *CoreScheduler) deploymentReap(deployments []string) error {
 // partitionDeploymentReap returns a list of DeploymentDeleteRequest to make,
 // ensuring a single request does not contain too many deployments. This is
 // necessary to ensure that the Raft transaction does not become too large.
-func (c *CoreScheduler) partitionDeploymentReap(deployments []string) []*structs.DeploymentDeleteRequest {
+func (c *CoreScheduler) partitionDeploymentReap(deployments []string, batchSize int) []*structs.DeploymentDeleteRequest {
 	var requests []*structs.DeploymentDeleteRequest
 	submittedDeployments := 0
 	for submittedDeployments != len(deployments) {
@@ -598,7 +599,7 @@ func (c *CoreScheduler) partitionDeploymentReap(deployments []string) []*structs
 			},
 		}
 		requests = append(requests, req)
-		available := structs.MaxUUIDsPerWriteRequest
+		available := batchSize
 
 		if remaining := len(deployments) - submittedDeployments; remaining > 0 {
 			if remaining <= available {
@@ -730,7 +731,7 @@ func (c *CoreScheduler) csiVolumeClaimGC(eval *structs.Evaluation) error {
 		// we only call the claim release RPC if the volume has claims
 		// that no longer have valid allocations. otherwise we'd send
 		// out a lot of do-nothing RPCs.
-		vol, err := c.snap.CSIVolumeDenormalize(ws, vol)
+		vol, err := c.snap.CSIVolumeDenormalize(ws, vol.Copy())
 		if err != nil {
 			return err
 		}
@@ -901,23 +902,17 @@ func (c *CoreScheduler) rootKeyRotateOrGC(eval *structs.Evaluation) error {
 	// a rotation will be sent to the leader so our view of state
 	// is no longer valid. we ack this core job and will pick up
 	// the GC work on the next interval
-	wasRotated, err := c.rootKeyRotation(eval)
+	wasRotated, err := c.rootKeyRotate(eval)
 	if err != nil {
 		return err
 	}
 	if wasRotated {
 		return nil
 	}
+	return c.rootKeyGC(eval)
+}
 
-	// we can't GC any key older than the oldest live allocation
-	// because it might have signed that allocation's workload
-	// identity; this is conservative so that we don't have to iterate
-	// over all the allocations and find out which keys signed their
-	// identity, which will be expensive on large clusters
-	allocOldThreshold, err := c.getOldestAllocationIndex()
-	if err != nil {
-		return err
-	}
+func (c *CoreScheduler) rootKeyGC(eval *structs.Evaluation) error {
 
 	oldThreshold := c.getThreshold(eval, "root key",
 		"root_key_gc_threshold", c.srv.config.RootKeyGCThreshold)
@@ -934,21 +929,19 @@ func (c *CoreScheduler) rootKeyRotateOrGC(eval *structs.Evaluation) error {
 			break
 		}
 		keyMeta := raw.(*structs.RootKeyMeta)
-		if keyMeta.Active() {
-			continue // never GC the active key
+		if keyMeta.Active() || keyMeta.Rekeying() {
+			continue // never GC the active key or one we're rekeying
 		}
 		if keyMeta.CreateIndex > oldThreshold {
 			continue // don't GC recent keys
 		}
-		if keyMeta.CreateIndex > allocOldThreshold {
-			continue // don't GC keys possibly used to sign live allocations
-		}
-		varIter, err := c.snap.GetVariablesByKeyID(ws, keyMeta.KeyID)
+
+		inUse, err := c.snap.IsRootKeyMetaInUse(keyMeta.KeyID)
 		if err != nil {
 			return err
 		}
-		if varIter.Next() != nil {
-			continue // key is still in use
+		if inUse {
+			continue
 		}
 
 		req := &structs.KeyringDeleteRootKeyRequest{
@@ -968,9 +961,9 @@ func (c *CoreScheduler) rootKeyRotateOrGC(eval *structs.Evaluation) error {
 	return nil
 }
 
-// rootKeyRotation checks if the active key is old enough that we need
-// to kick off a rotation. Returns true if the key was rotated.
-func (c *CoreScheduler) rootKeyRotation(eval *structs.Evaluation) (bool, error) {
+// rootKeyRotate checks if the active key is old enough that we need
+// to kick off a rotation.
+func (c *CoreScheduler) rootKeyRotate(eval *structs.Evaluation) (bool, error) {
 
 	rotationThreshold := c.getThreshold(eval, "root key",
 		"root_key_rotation_threshold", c.srv.config.RootKeyRotationThreshold)
@@ -1033,29 +1026,6 @@ func (c *CoreScheduler) variablesRekey(eval *structs.Evaluation) error {
 			return err
 		}
 
-		// we've now rotated all this key's variables, so set its state
-		keyMeta = keyMeta.Copy()
-		keyMeta.SetDeprecated()
-
-		key, err := c.srv.encrypter.GetKey(keyMeta.KeyID)
-		if err != nil {
-			return err
-		}
-		req := &structs.KeyringUpdateRootKeyRequest{
-			RootKey: &structs.RootKey{
-				Meta: keyMeta,
-				Key:  key,
-			},
-			Rekey: false,
-			WriteRequest: structs.WriteRequest{
-				Region:    c.srv.config.Region,
-				AuthToken: eval.LeaderACL},
-		}
-		if err := c.srv.RPC("Keyring.Update",
-			req, &structs.KeyringUpdateRootKeyResponse{}); err != nil {
-			c.logger.Error("root key update failed", "error", err)
-			return err
-		}
 	}
 
 	return nil
@@ -1084,7 +1054,7 @@ func (c *CoreScheduler) rotateVariables(iter memdb.ResultIterator, eval *structs
 	//
 	// Instead, we'll rate limit RPC requests and have a timeout. If we still
 	// haven't finished the set by the timeout, emit a new eval.
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), c.srv.GetConfig().EvalNackTimeout/2)
 	defer cancel()
 	limiter := rate.NewLimiter(rate.Limit(100), 100)
 
@@ -1175,25 +1145,4 @@ func (c *CoreScheduler) getThreshold(eval *structs.Evaluation, objectName, confi
 			configName, configThreshold)
 	}
 	return oldThreshold
-}
-
-// getOldestAllocationIndex returns the CreateIndex of the oldest
-// non-terminal allocation in the state store
-func (c *CoreScheduler) getOldestAllocationIndex() (uint64, error) {
-	ws := memdb.NewWatchSet()
-	allocs, err := c.snap.Allocs(ws, state.SortDefault)
-	if err != nil {
-		return 0, err
-	}
-	for {
-		raw := allocs.Next()
-		if raw == nil {
-			break
-		}
-		alloc := raw.(*structs.Allocation)
-		if !alloc.TerminalStatus() {
-			return alloc.CreateIndex, nil
-		}
-	}
-	return 0, nil
 }

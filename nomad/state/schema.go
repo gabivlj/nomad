@@ -1,10 +1,13 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package state
 
 import (
 	"fmt"
 	"sync"
 
-	memdb "github.com/hashicorp/go-memdb"
+	"github.com/hashicorp/go-memdb"
 	"github.com/hashicorp/nomad/nomad/state/indexer"
 	"github.com/hashicorp/nomad/nomad/structs"
 )
@@ -13,11 +16,16 @@ const (
 	tableIndex = "index"
 
 	TableNamespaces           = "namespaces"
+	TableNodePools            = "node_pools"
 	TableServiceRegistrations = "service_registrations"
 	TableVariables            = "variables"
 	TableVariablesQuotas      = "variables_quota"
 	TableRootKeyMeta          = "root_key_meta"
 	TableACLRoles             = "acl_roles"
+	TableACLAuthMethods       = "acl_auth_methods"
+	TableACLBindingRules      = "acl_binding_rules"
+	TableAllocs               = "allocs"
+	TableJobSubmission        = "job_submission"
 )
 
 const (
@@ -31,6 +39,8 @@ const (
 	indexKeyID         = "key_id"
 	indexPath          = "path"
 	indexName          = "name"
+	indexSigningKey    = "signing_key"
+	indexAuthMethod    = "auth_method"
 )
 
 var (
@@ -58,9 +68,11 @@ func init() {
 	RegisterSchemaFactories([]SchemaFactory{
 		indexTableSchema,
 		nodeTableSchema,
+		nodePoolTableSchema,
 		jobTableSchema,
 		jobSummarySchema,
 		jobVersionSchema,
+		jobSubmissionSchema,
 		deploymentSchema,
 		periodicLaunchTableSchema,
 		evalTableSchema,
@@ -83,6 +95,8 @@ func init() {
 		variablesQuotasTableSchema,
 		variablesRootKeyMetaSchema,
 		aclRolesTableSchema,
+		aclAuthMethodsTableSchema,
+		bindingRulesTableSchema,
 	}...)
 }
 
@@ -147,6 +161,34 @@ func nodeTableSchema() *memdb.TableSchema {
 					Field: "SecretID",
 				},
 			},
+			"node_pool": {
+				Name:         "node_pool",
+				AllowMissing: false,
+				Unique:       false,
+				Indexer: &memdb.StringFieldIndex{
+					Field: "NodePool",
+				},
+			},
+		},
+	}
+}
+
+// nodePoolTableSchema returns the MemDB schema for the node pools table.
+// This table is used to store all the node pools registered in the cluster.
+func nodePoolTableSchema() *memdb.TableSchema {
+	return &memdb.TableSchema{
+		Name: TableNodePools,
+		Indexes: map[string]*memdb.IndexSchema{
+			// Name is the primary index used for lookup and is required to be
+			// unique.
+			"id": {
+				Name:         "id",
+				AllowMissing: false,
+				Unique:       true,
+				Indexer: &memdb.StringFieldIndex{
+					Field: "Name",
+				},
+			},
 		},
 	}
 }
@@ -204,6 +246,14 @@ func jobTableSchema() *memdb.TableSchema {
 					Conditional: jobIsPeriodic,
 				},
 			},
+			"pool": {
+				Name:         "pool",
+				AllowMissing: false,
+				Unique:       false,
+				Indexer: &memdb.StringFieldIndex{
+					Field: "NodePool",
+				},
+			},
 		},
 	}
 }
@@ -257,6 +307,41 @@ func jobVersionSchema() *memdb.TableSchema {
 
 						&memdb.StringFieldIndex{
 							Field:     "ID",
+							Lowercase: true,
+						},
+
+						&memdb.UintFieldIndex{
+							Field: "Version",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// jobSubmissionSchema returns the memdb table schema of job submissions
+// which contain the original source material of each job, per version.
+func jobSubmissionSchema() *memdb.TableSchema {
+	return &memdb.TableSchema{
+		Name: TableJobSubmission,
+		Indexes: map[string]*memdb.IndexSchema{
+			"id": {
+				Name:         "id",
+				AllowMissing: false,
+				Unique:       true,
+				// index by (Namespace, JobID, Version)
+				// note: uniqueness applies only at the moment of insertion,
+				// if anything modifies one of these fields (as the stored
+				// struct is a pointer, there is no consistency)
+				Indexer: &memdb.CompoundIndex{
+					Indexes: []memdb.Indexer{
+						&memdb.StringFieldIndex{
+							Field: "Namespace",
+						},
+
+						&memdb.StringFieldIndex{
+							Field:     "JobID",
 							Lowercase: true,
 						},
 
@@ -686,6 +771,35 @@ func allocTableSchema() *memdb.TableSchema {
 					Field: "DeploymentID",
 				},
 			},
+
+			// signing_key index is used to lookup live allocations by signing
+			// key ID
+			indexSigningKey: {
+				Name:         indexSigningKey,
+				AllowMissing: true, // terminal allocations won't be indexed
+				Unique:       false,
+				Indexer: &memdb.CompoundIndex{
+					Indexes: []memdb.Indexer{
+						&memdb.StringFieldIndex{
+							Field: "SigningKeyID",
+						},
+						&memdb.ConditionalIndex{
+							Conditional: func(obj interface{}) (bool, error) {
+								alloc, ok := obj.(*structs.Allocation)
+								if !ok {
+									return false, fmt.Errorf(
+										"wrong type, got %t should be Allocation", obj)
+								}
+								// note: this isn't alloc.TerminalStatus(),
+								// because we only want to consider the key
+								// unused if the allocation is terminal on both
+								// server and client
+								return !(alloc.ClientTerminalStatus() && alloc.ServerTerminalStatus()), nil
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 }
@@ -813,7 +927,7 @@ func (a *ACLPolicyJobACLFieldIndex) FromObject(obj interface{}) (bool, []byte, e
 	jobID := policy.JobACL.JobID
 	if jobID == "" {
 		return false, nil, fmt.Errorf(
-			"object %#v is not a valid ACLPolicy: JobACL.JobID without Namespace", obj)
+			"object %#v is not a valid ACLPolicy: Namespace without JobID", obj)
 	}
 
 	val := ns + "\x00" + jobID + "\x00"
@@ -1065,7 +1179,7 @@ func csiPluginTableSchema() *memdb.TableSchema {
 	}
 }
 
-// StringFieldIndex is used to extract a field from an object
+// ScalingPolicyTargetFieldIndex is used to extract a field from an object
 // using reflection and builds an index on that field.
 type ScalingPolicyTargetFieldIndex struct {
 	Field string
@@ -1220,16 +1334,6 @@ func scalingEventTableSchema() *memdb.TableSchema {
 					},
 				},
 			},
-
-			// TODO: need to figure out whether we want to index these or the jobs or ...
-			// "error": {
-			// 	Name:         "error",
-			// 	AllowMissing: false,
-			// 	Unique:       false,
-			// 	Indexer: &memdb.FieldSetIndex{
-			// 		Field: "Error",
-			// 	},
-			// },
 		},
 	}
 }
@@ -1480,6 +1584,46 @@ func aclRolesTableSchema() *memdb.TableSchema {
 				Unique:       true,
 				Indexer: &memdb.StringFieldIndex{
 					Field: "Name",
+				},
+			},
+		},
+	}
+}
+
+func aclAuthMethodsTableSchema() *memdb.TableSchema {
+	return &memdb.TableSchema{
+		Name: TableACLAuthMethods,
+		Indexes: map[string]*memdb.IndexSchema{
+			indexID: {
+				Name:         indexID,
+				AllowMissing: false,
+				Unique:       true,
+				Indexer: &memdb.StringFieldIndex{
+					Field: "Name",
+				},
+			},
+		},
+	}
+}
+
+func bindingRulesTableSchema() *memdb.TableSchema {
+	return &memdb.TableSchema{
+		Name: TableACLBindingRules,
+		Indexes: map[string]*memdb.IndexSchema{
+			indexID: {
+				Name:         indexID,
+				AllowMissing: false,
+				Unique:       true,
+				Indexer: &memdb.StringFieldIndex{
+					Field: "ID",
+				},
+			},
+			indexAuthMethod: {
+				Name:         indexAuthMethod,
+				AllowMissing: false,
+				Unique:       false,
+				Indexer: &memdb.StringFieldIndex{
+					Field: "AuthMethod",
 				},
 			},
 		},

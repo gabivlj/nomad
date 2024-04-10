@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) HashiCorp, Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ */
+
 import { computed } from '@ember/object';
 import DistributionBar from './distribution-bar';
 import { attributeBindings } from '@ember-decorators/component';
@@ -22,7 +27,7 @@ export default class ServiceStatusBar extends DistributionBar {
     const failing = this.status.failure || 0;
     const success = this.status.success || 0;
 
-    const [grey, red, green] = ['queued', 'failed', 'complete'];
+    const [grey, red, green] = ['queued', 'failed', 'running'];
 
     return [
       {

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package command
 
 import (
@@ -5,12 +8,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/hashicorp/nomad/api"
 	"github.com/hashicorp/nomad/ci"
 	"github.com/mitchellh/cli"
-	"github.com/stretchr/testify/require"
+	"github.com/shoenig/test/must"
 )
 
 func TestVarListCommand_Implements(t *testing.T) {
@@ -19,7 +21,7 @@ func TestVarListCommand_Implements(t *testing.T) {
 }
 
 // TestVarListCommand_Offline contains all of the tests that do not require a
-// testagent to complete
+// testServer to complete
 func TestVarListCommand_Offline(t *testing.T) {
 	ci.Parallel(t)
 	ui := cli.NewMockUi()
@@ -51,6 +53,24 @@ func TestVarListCommand_Offline(t *testing.T) {
 			exitCode:           1,
 			expectStdErrPrefix: "Error initializing client: invalid address",
 		},
+		{
+			name:               "missing template",
+			args:               []string{`-out=go-template`, "foo"},
+			exitCode:           1,
+			expectStdErrPrefix: errMissingTemplate,
+		},
+		{
+			name:               "unexpected_template",
+			args:               []string{`-out=json`, `-template="bad"`, "foo"},
+			exitCode:           1,
+			expectStdErrPrefix: errUnexpectedTemplate,
+		},
+		{
+			name:               "bad out",
+			args:               []string{`-out=bad`, "foo"},
+			exitCode:           1,
+			expectStdErrPrefix: errInvalidListOutFormat,
+		},
 	}
 	for _, tC := range testCases {
 		t.Run(tC.name, func(t *testing.T) {
@@ -60,43 +80,36 @@ func TestVarListCommand_Offline(t *testing.T) {
 			errOut := ui.ErrorWriter.String()
 			defer resetUiWriters(ui)
 
-			require.Equal(t, tC.exitCode, ec,
-				"Expected exit code %v; got: %v\nstdout: %s\nstderr: %s",
-				tC.exitCode, ec, stdOut, errOut,
-			)
+			must.Eq(t, tC.exitCode, ec)
 			if tC.expectUsage {
 				help := cmd.Help()
-				require.Equal(t, help, strings.TrimSpace(stdOut))
+				must.Eq(t, help, strings.TrimSpace(stdOut))
 				// Test that stdout ends with a linefeed since we trim them for
 				// convenience in the equality tests.
-				require.True(t, strings.HasSuffix(stdOut, "\n"),
-					"stdout does not end with a linefeed")
+				must.True(t, strings.HasSuffix(stdOut, "\n"))
 			}
 			if tC.expectUsageError {
-				require.Contains(t, errOut, commandErrorText(cmd))
+				must.StrContains(t, errOut, commandErrorText(cmd))
 			}
 			if tC.expectStdOut != "" {
-				require.Equal(t, tC.expectStdOut, strings.TrimSpace(stdOut))
+				must.Eq(t, tC.expectStdOut, strings.TrimSpace(stdOut))
 				// Test that stdout ends with a linefeed since we trim them for
 				// convenience in the equality tests.
-				require.True(t, strings.HasSuffix(stdOut, "\n"),
-					"stdout does not end with a linefeed")
+				must.True(t, strings.HasSuffix(stdOut, "\n"))
 			}
 			if tC.expectStdErrPrefix != "" {
-				require.True(t, strings.HasPrefix(errOut, tC.expectStdErrPrefix),
-					"Expected stderr to start with %q; got %s",
-					tC.expectStdErrPrefix, errOut)
+				must.True(t, strings.HasPrefix(errOut, tC.expectStdErrPrefix))
+
 				// Test that stderr ends with a linefeed since we trim them for
 				// convenience in the equality tests.
-				require.True(t, strings.HasSuffix(errOut, "\n"),
-					"stderr does not end with a linefeed")
+				must.True(t, strings.HasSuffix(errOut, "\n"))
 			}
 		})
 	}
 }
 
-// TestVarListCommand_Online contains all of the tests that use a testagent.
-// They reuse the same testagent so that they can run in parallel and minimize
+// TestVarListCommand_Online contains all of the tests that use a testServer.
+// They reuse the same testServer so that they can run in parallel and minimize
 // test startup time costs.
 func TestVarListCommand_Online(t *testing.T) {
 	ci.Parallel(t)
@@ -110,14 +123,7 @@ func TestVarListCommand_Online(t *testing.T) {
 
 	nsList := []string{api.DefaultNamespace, "ns1"}
 	pathList := []string{"a/b/c", "a/b/c/d", "z/y", "z/y/x"}
-	toJSON := func(in interface{}) string {
-		b, err := json.MarshalIndent(in, "", "    ")
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(string(b))
-	}
-	variables := setupTestVariables(client, nsList, pathList)
+	variables := setupTestVariables(t, client, nsList, pathList)
 
 	testTmpl := `{{ range $i, $e := . }}{{if ne $i 0}}{{print "•"}}{{end}}{{printf "%v\t%v" .Namespace .Path}}{{end}}`
 
@@ -126,10 +132,10 @@ func TestVarListCommand_Online(t *testing.T) {
 
 			expect := expect
 			exp, ok := expect.(NSPather)
-			require.True(t, ok, "expect is not an NSPather, got %T", expect)
+			must.True(t, ok)
 			in, ok := check.(NSPather)
-			require.True(t, ok, "check is not an NSPather, got %T", check)
-			require.ElementsMatch(t, exp.NSPaths(), in.NSPaths())
+			must.True(t, ok)
+			must.Eq(t, exp.NSPaths(), in.NSPaths())
 		}
 		return out
 	}
@@ -139,11 +145,9 @@ func TestVarListCommand_Online(t *testing.T) {
 
 			length := length
 			in, ok := check.(NSPather)
-			require.True(t, ok, "check is not an NSPather, got %T", check)
+			must.True(t, ok)
 			inLen := in.NSPaths().Len()
-			require.Equal(t, length, inLen,
-				"expected length of %v, got %v. \nvalues: %v",
-				length, inLen, in.NSPaths())
+			must.Eq(t, length, inLen)
 		}
 		return out
 	}
@@ -151,57 +155,57 @@ func TestVarListCommand_Online(t *testing.T) {
 	testCases := []testVarListTestCase{
 		{
 			name:         "plaintext/not found",
-			args:         []string{"does/not/exist"},
-			expectStdOut: msgVariableNotFound,
+			args:         []string{"-out=table", "does/not/exist"},
+			expectStdOut: errNoMatchingVariables,
 		},
 		{
 			name: "plaintext/single variable",
-			args: []string{"a/b/c/d"},
+			args: []string{"-out=table", "a/b/c/d"},
 			expectStdOut: formatList([]string{
 				"Namespace|Path|Last Updated",
 				fmt.Sprintf(
 					"default|a/b/c/d|%s",
-					time.Unix(0, variables.HavingPrefix("a/b/c/d")[0].ModifyTime),
+					formatUnixNanoTime(variables.HavingPrefix("a/b/c/d")[0].ModifyTime),
 				),
 			},
 			),
 		},
 		{
-			name:         "plaintext/quiet",
-			args:         []string{"-q"},
+			name:         "plaintext/terse",
+			args:         []string{"-out=terse"},
 			expectStdOut: strings.Join(variables.HavingNamespace(api.DefaultNamespace).Strings(), "\n"),
 		},
 		{
-			name:         "plaintext/quiet/prefix",
-			args:         []string{"-q", "a/b/c"},
+			name:         "plaintext/terse/prefix",
+			args:         []string{"-out=terse", "a/b/c"},
 			expectStdOut: strings.Join(variables.HavingNSPrefix(api.DefaultNamespace, "a/b/c").Strings(), "\n"),
 		},
 		{
-			name:               "plaintext/quiet/filter",
-			args:               []string{"-q", "-filter", "VariableMetadata.Path == \"a/b/c\""},
+			name:               "plaintext/terse/filter",
+			args:               []string{"-out=terse", "-filter", "VariableMetadata.Path == \"a/b/c\""},
 			expectStdOut:       "a/b/c",
 			expectStdErrPrefix: msgWarnFilterPerformance,
 		},
 		{
-			name:               "plaintext/quiet/paginated",
-			args:               []string{"-q", "-per-page=1"},
+			name:               "plaintext/terse/paginated",
+			args:               []string{"-out=terse", "-per-page=1"},
 			expectStdOut:       "a/b/c",
 			expectStdErrPrefix: "Next page token",
 		},
 		{
-			name:         "plaintext/quiet/prefix/wildcard ns",
-			args:         []string{"-q", "-namespace", "*", "a/b/c/d"},
+			name:         "plaintext/terse/prefix/wildcard ns",
+			args:         []string{"-out=terse", "-namespace", "*", "a/b/c/d"},
 			expectStdOut: strings.Join(variables.HavingPrefix("a/b/c/d").Strings(), "\n"),
 		},
 		{
-			name:               "plaintext/quiet/paginated/prefix/wildcard ns",
-			args:               []string{"-q", "-per-page=1", "-namespace", "*", "a/b/c/d"},
+			name:               "plaintext/terse/paginated/prefix/wildcard ns",
+			args:               []string{"-out=terse", "-per-page=1", "-namespace", "*", "a/b/c/d"},
 			expectStdOut:       variables.HavingPrefix("a/b/c/d").Strings()[0],
 			expectStdErrPrefix: "Next page token",
 		},
 		{
 			name: "json/not found",
-			args: []string{"-json", "does/not/exist"},
+			args: []string{"-out=json", "does/not/exist"},
 			jsonTest: &testVarListJSONTest{
 				jsonDest: &SVMSlice{},
 				expectFns: []testVarListJSONTestExpectFn{
@@ -211,7 +215,7 @@ func TestVarListCommand_Online(t *testing.T) {
 		},
 		{
 			name: "json/prefix",
-			args: []string{"-json", "a"},
+			args: []string{"-out=json", "a"},
 			jsonTest: &testVarListJSONTest{
 				jsonDest: &SVMSlice{},
 				expectFns: []testVarListJSONTestExpectFn{
@@ -221,7 +225,7 @@ func TestVarListCommand_Online(t *testing.T) {
 		},
 		{
 			name: "json/paginated",
-			args: []string{"-json", "-per-page", "1"},
+			args: []string{"-out=json", "-per-page", "1"},
 			jsonTest: &testVarListJSONTest{
 				jsonDest: &PaginatedSVMSlice{},
 				expectFns: []testVarListJSONTestExpectFn{
@@ -229,68 +233,32 @@ func TestVarListCommand_Online(t *testing.T) {
 				},
 			},
 		},
-		{
-			name:         "json/quiet",
-			args:         []string{"-q", "-json"},
-			expectStdOut: toJSON(variables.HavingNamespace(api.DefaultNamespace).Strings()),
-		},
-		{
-			name: "json/quiet/paginated",
-			args: []string{"-q", "-json", "-per-page", "1"},
-			jsonTest: &testVarListJSONTest{
-				jsonDest: &PaginatedSVQuietSlice{},
-				expectFns: []testVarListJSONTestExpectFn{
-					hasLength(t, 1),
-				},
-			},
-		},
-		{
-			name: "json/quiet/wildcard-ns",
-			args: []string{"-q", "-json", "-namespace", "*"},
-			jsonTest: &testVarListJSONTest{
-				jsonDest: &SVMSlice{},
-				expectFns: []testVarListJSONTestExpectFn{
-					hasLength(t, variables.Len()),
-					pathsEqual(t, variables),
-				},
-			},
-		},
-		{
-			name: "json/quiet/paginated/wildcard-ns",
-			args: []string{"-q", "-json", "-per-page=1", "-namespace", "*"},
-			jsonTest: &testVarListJSONTest{
-				jsonDest: &PaginatedSVMSlice{},
-				expectFns: []testVarListJSONTestExpectFn{
-					hasLength(t, 1),
-					pathsEqual(t, SVMSlice{variables[0]}),
-				},
-			},
-		},
+
 		{
 			name:         "template/not found",
-			args:         []string{"-t", testTmpl, "does/not/exist"},
+			args:         []string{"-out=go-template", "-template", testTmpl, "does/not/exist"},
 			expectStdOut: "",
 		},
 		{
 			name:         "template/prefix",
-			args:         []string{"-t", testTmpl, "a/b/c/d"},
+			args:         []string{"-out=go-template", "-template", testTmpl, "a/b/c/d"},
 			expectStdOut: "default\ta/b/c/d",
 		},
 		{
 			name:               "template/filter",
-			args:               []string{"-t", testTmpl, "-filter", "VariableMetadata.Path == \"a/b/c\""},
+			args:               []string{"-out=go-template", "-template", testTmpl, "-filter", "VariableMetadata.Path == \"a/b/c\""},
 			expectStdOut:       "default\ta/b/c",
 			expectStdErrPrefix: msgWarnFilterPerformance,
 		},
 		{
 			name:               "template/paginated",
-			args:               []string{"-t", testTmpl, "-per-page=1"},
+			args:               []string{"-out=go-template", "-template", testTmpl, "-per-page=1"},
 			expectStdOut:       "default\ta/b/c",
 			expectStdErrPrefix: "Next page token",
 		},
 		{
 			name:         "template/prefix/wildcard namespace",
-			args:         []string{"-namespace", "*", "-t", testTmpl, "a/b/c/d"},
+			args:         []string{"-namespace", "*", "-out=go-template", "-template", testTmpl, "a/b/c/d"},
 			expectStdOut: "default\ta/b/c/d•ns1\ta/b/c/d",
 		},
 	}
@@ -307,34 +275,28 @@ func TestVarListCommand_Online(t *testing.T) {
 			errOut := ui.ErrorWriter.String()
 			defer resetUiWriters(ui)
 
-			require.Equal(t, tC.exitCode, code,
-				"Expected exit code %v; got: %v\nstdout: %s\nstderr: %s",
-				tC.exitCode, code, stdOut, errOut)
+			must.Eq(t, tC.exitCode, code)
 
 			if tC.expectStdOut != "" {
-				require.Equal(t, tC.expectStdOut, strings.TrimSpace(stdOut))
+				must.Eq(t, tC.expectStdOut, strings.TrimSpace(stdOut))
 
 				// Test that stdout ends with a linefeed since we trim them for
 				// convenience in the equality tests.
-				require.True(t, strings.HasSuffix(stdOut, "\n"),
-					"stdout does not end with a linefeed")
+				must.True(t, strings.HasSuffix(stdOut, "\n"))
 			}
 
 			if tC.expectStdErrPrefix != "" {
-				require.True(t, strings.HasPrefix(errOut, tC.expectStdErrPrefix),
-					"Expected stderr to start with %q; got %s",
-					tC.expectStdErrPrefix, errOut)
+				must.True(t, strings.HasPrefix(errOut, tC.expectStdErrPrefix))
 
 				// Test that stderr ends with a linefeed since this test only
 				// considers prefixes.
-				require.True(t, strings.HasSuffix(stdOut, "\n"),
-					"stderr does not end with a linefeed")
+				must.True(t, strings.HasSuffix(stdOut, "\n"))
 			}
 
 			if tC.jsonTest != nil {
 				jtC := tC.jsonTest
 				err := json.Unmarshal([]byte(stdOut), &jtC.jsonDest)
-				require.NoError(t, err, "stdout: %s", stdOut)
+				must.NoError(t, err)
 
 				for _, fn := range jtC.expectFns {
 					fn(t, jtC.jsonDest)
@@ -372,25 +334,32 @@ type testSVNamespacePath struct {
 	Path      string
 }
 
-func setupTestVariables(c *api.Client, nsList, pathList []string) SVMSlice {
+func setupTestVariables(t *testing.T, c *api.Client, nsList, pathList []string) SVMSlice {
 
 	out := make(SVMSlice, 0, len(nsList)*len(pathList))
 
 	for _, ns := range nsList {
 		c.Namespaces().Register(&api.Namespace{Name: ns}, nil)
 		for _, p := range pathList {
-			setupTestVariable(c, ns, p, &out)
+			must.NoError(t, setupTestVariable(c, ns, p, &out))
 		}
 	}
 
 	return out
 }
 
-func setupTestVariable(c *api.Client, ns, p string, out *SVMSlice) {
-	testVar := &api.Variable{Items: map[string]string{"k": "v"}}
-	c.Raw().Write("/v1/var/"+p, testVar, nil, &api.WriteOptions{Namespace: ns})
-	v, _, _ := c.Variables().Read(p, &api.QueryOptions{Namespace: ns})
+func setupTestVariable(c *api.Client, ns, p string, out *SVMSlice) error {
+	testVar := &api.Variable{
+		Namespace: ns,
+		Path:      p,
+		Items:     map[string]string{"k": "v"}}
+	v, _, err := c.Variables().Create(testVar, &api.WriteOptions{Namespace: ns})
+	if err != nil {
+		return err
+	}
+
 	*out = append(*out, *v.Metadata())
+	return nil
 }
 
 type NSPather interface {

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package api
 
 import (
@@ -5,7 +8,7 @@ import (
 	"net/url"
 )
 
-// Keyring is used to access the Secure Variables keyring
+// Keyring is used to access the Variables keyring.
 type Keyring struct {
 	client *Client
 }
@@ -22,13 +25,6 @@ type EncryptionAlgorithm string
 const (
 	EncryptionAlgorithmAES256GCM EncryptionAlgorithm = "aes256-gcm"
 )
-
-// RootKey wraps key metadata and the key itself. The key must be
-// base64 encoded
-type RootKey struct {
-	Meta *RootKeyMeta
-	Key  string
-}
 
 // RootKeyMeta is the metadata used to refer to a RootKey.
 type RootKeyMeta struct {
@@ -72,12 +68,6 @@ type KeyringDeleteOptions struct {
 	KeyID string // UUID
 }
 
-// Update upserts a key into the keyring
-func (k *Keyring) Update(key *RootKey, w *WriteOptions) (*WriteMeta, error) {
-	wm, err := k.client.write("/v1/operator/keyring/keys", key, nil, w)
-	return wm, err
-}
-
 // Rotate requests a key rotation
 func (k *Keyring) Rotate(opts *KeyringRotateOptions, w *WriteOptions) (*RootKeyMeta, *WriteMeta, error) {
 	qp := url.Values{}
@@ -90,7 +80,7 @@ func (k *Keyring) Rotate(opts *KeyringRotateOptions, w *WriteOptions) (*RootKeyM
 		}
 	}
 	resp := &struct{ Key *RootKeyMeta }{}
-	wm, err := k.client.write("/v1/operator/keyring/rotate?"+qp.Encode(), nil, resp, w)
+	wm, err := k.client.put("/v1/operator/keyring/rotate?"+qp.Encode(), nil, resp, w)
 	return resp.Key, wm, err
 }
 

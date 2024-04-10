@@ -1,14 +1,17 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package checkstore
 
 import (
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/client/serviceregistration/checks"
 	"github.com/hashicorp/nomad/client/state"
-	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/nomad/structs"
-	"golang.org/x/exp/slices"
 )
 
 // A Shim is used to track the latest check status information, one layer above
@@ -28,6 +31,10 @@ type Shim interface {
 
 	// Purge results for a specific allocation.
 	Purge(allocID string) error
+
+	// Snapshot returns a copy of the current status of every check indexed by
+	// checkID, for use by CheckWatcher.
+	Snapshot() map[string]string
 }
 
 type shim struct {
@@ -63,7 +70,7 @@ func (s *shim) restore() {
 	}
 
 	for id, m := range results {
-		s.current[id] = helper.CopyMap(m)
+		s.current[id] = maps.Clone(m)
 	}
 }
 
@@ -110,7 +117,7 @@ func (s *shim) List(allocID string) map[structs.CheckID]*structs.CheckQueryResul
 		return nil
 	}
 
-	return helper.CopyMap(m)
+	return maps.Clone(m)
 }
 
 func (s *shim) Purge(allocID string) error {
@@ -149,4 +156,17 @@ func (s *shim) Difference(allocID string, ids []structs.CheckID) []structs.Check
 	}
 
 	return remove
+}
+
+func (s *shim) Snapshot() map[string]string {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+
+	result := make(map[string]string)
+	for _, m := range s.current {
+		for checkID, status := range m {
+			result[string(checkID)] = string(status.Status)
+		}
+	}
+	return result
 }

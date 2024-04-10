@@ -1,19 +1,25 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package helper
 
 import (
 	"crypto/sha512"
 	"fmt"
+	"maps"
+	"math"
 	"net/http"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	multierror "github.com/hashicorp/go-multierror"
-	"github.com/hashicorp/go-set"
+	"github.com/hashicorp/go-set/v2"
 	"github.com/hashicorp/hcl/hcl/ast"
-	"golang.org/x/exp/constraints"
 )
 
 // validUUID is used to check if a given string looks like a UUID
@@ -75,98 +81,28 @@ func HashUUID(input string) (output string, hashed bool) {
 	return output, true
 }
 
-// Min returns the minimum of a and b.
-func Min[T constraints.Ordered](a, b T) T {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// Max returns the maximum of a and b.
-func Max[T constraints.Ordered](a, b T) T {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// MapStringStringSliceValueSet returns the set of values in a map[string][]string
-func MapStringStringSliceValueSet(m map[string][]string) []string {
-	set := make(map[string]struct{})
+// UniqueMapSliceValues returns the union of values from each slice in a map[K][]V.
+func UniqueMapSliceValues[K, V comparable](m map[K][]V) []V {
+	s := set.New[V](0)
 	for _, slice := range m {
-		for _, v := range slice {
-			set[v] = struct{}{}
-		}
+		s.InsertSlice(slice)
 	}
-
-	flat := make([]string, 0, len(set))
-	for k := range set {
-		flat = append(flat, k)
-	}
-	return flat
+	return s.Slice()
 }
 
-func SliceStringToSet(s []string) map[string]struct{} {
-	m := make(map[string]struct{}, (len(s)+1)/2)
-	for _, k := range s {
-		m[k] = struct{}{}
-	}
-	return m
-}
-
-func SetToSliceString(set map[string]struct{}) []string {
-	flattened := make([]string, 0, len(set))
-	for x := range set {
-		flattened = append(flattened, x)
-	}
-	return flattened
-}
-
-// SliceStringIsSubset returns whether the smaller set of strings is a subset of
-// the larger. If the smaller slice is not a subset, the offending elements are
+// IsSubset returns whether the smaller set of items is a subset of
+// the larger. If the smaller set is not a subset, the offending elements are
 // returned.
-func SliceStringIsSubset(larger, smaller []string) (bool, []string) {
-	largerSet := make(map[string]struct{}, len(larger))
-	for _, l := range larger {
-		largerSet[l] = struct{}{}
+func IsSubset[T comparable](larger, smaller []T) (bool, []T) {
+	l := set.From(larger)
+	if l.ContainsSlice(smaller) {
+		return true, nil
 	}
-
-	subset := true
-	var offending []string
-	for _, s := range smaller {
-		if _, ok := largerSet[s]; !ok {
-			subset = false
-			offending = append(offending, s)
-		}
-	}
-
-	return subset, offending
+	s := set.From(smaller)
+	return false, s.Difference(l).Slice()
 }
 
-// SliceStringContains returns whether item exists at least once in list.
-//
-// Deprecated; use slices.Contains instead.
-func SliceStringContains(list []string, item string) bool {
-	for _, s := range list {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// SliceStringHasPrefix returns true if any string in list starts with prefix
-func SliceStringHasPrefix(list []string, prefix string) bool {
-	for _, s := range list {
-		if strings.HasPrefix(s, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// StringHasPrefixInSlice returns true if string starts with any prefix in list
+// StringHasPrefixInSlice returns true if s starts with any prefix in list.
 func StringHasPrefixInSlice(s string, prefixes []string) bool {
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(s, prefix) {
@@ -176,100 +112,15 @@ func StringHasPrefixInSlice(s string, prefixes []string) bool {
 	return false
 }
 
-func SliceSetDisjoint(first, second []string) (bool, []string) {
-	contained := make(map[string]struct{}, len(first))
-	for _, k := range first {
-		contained[k] = struct{}{}
+// IsDisjoint returns whether first and second are disjoint sets, and the set of
+// offending elements if not.
+func IsDisjoint[T comparable](first, second []T) (bool, []T) {
+	f, s := set.From(first), set.From(second)
+	intersection := f.Intersect(s)
+	if intersection.Size() > 0 {
+		return false, intersection.Slice()
 	}
-
-	offending := make(map[string]struct{})
-	for _, k := range second {
-		if _, ok := contained[k]; ok {
-			offending[k] = struct{}{}
-		}
-	}
-
-	if len(offending) == 0 {
-		return true, nil
-	}
-
-	flattened := make([]string, 0, len(offending))
-	for k := range offending {
-		flattened = append(flattened, k)
-	}
-	return false, flattened
-}
-
-// CompareSliceSetString returns true if the slices contain the same strings.
-// Order is ignored. The slice may be copied but is never altered. The slice is
-// assumed to be a set. Multiple instances of an entry are treated the same as
-// a single instance.
-func CompareSliceSetString(a, b []string) bool {
-	n := len(a)
-	if n != len(b) {
-		return false
-	}
-
-	// Copy a into a map and compare b against it
-	amap := make(map[string]struct{}, n)
-	for i := range a {
-		amap[a[i]] = struct{}{}
-	}
-
-	for i := range b {
-		if _, ok := amap[b[i]]; !ok {
-			return false
-		}
-	}
-
-	return true
-}
-
-// CompareMapStringString returns true if the maps are equivalent. A nil and
-// empty map are considered not equal.
-func CompareMapStringString(a, b map[string]string) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-
-	if len(a) != len(b) {
-		return false
-	}
-
-	for k, v := range a {
-		v2, ok := b[k]
-		if !ok {
-			return false
-		}
-		if v != v2 {
-			return false
-		}
-	}
-
-	// Already compared all known values in a so only test that keys from b
-	// exist in a
-	for k := range b {
-		if _, ok := a[k]; !ok {
-			return false
-		}
-	}
-
-	return true
-}
-
-// CopyMap creates a copy of m. Struct values are not deep copies.
-//
-// If m is nil the return value is nil.
-func CopyMap[M ~map[K]V, K comparable, V any](m M) M {
-	if m == nil {
-		return nil
-	}
-
-	result := make(M, len(m))
-	for k, v := range m {
-		result[k] = v
-	}
-	return result
+	return true, nil
 }
 
 // DeepCopyMap creates a copy of m by calling Copy() on each value.
@@ -301,51 +152,6 @@ func CopySlice[S ~[]E, E Copyable[E]](s S) S {
 	return result
 }
 
-// CopyMapStringString creates a copy of m.
-//
-// Deprecated; use CopyMap instead.
-func CopyMapStringString(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-
-	c := make(map[string]string, len(m))
-	for k, v := range m {
-		c[k] = v
-	}
-	return c
-}
-
-// CopyMapStringStruct creates a copy of m.
-//
-// Deprecated; use CopyMap instead.
-func CopyMapStringStruct(m map[string]struct{}) map[string]struct{} {
-	if m == nil {
-		return nil
-	}
-
-	c := make(map[string]struct{}, len(m))
-	for k := range m {
-		c[k] = struct{}{}
-	}
-	return c
-}
-
-// CopyMapStringInterface creates a copy of m.
-//
-// Deprecated; use CopyMap instead.
-func CopyMapStringInterface(m map[string]interface{}) map[string]interface{} {
-	if m == nil {
-		return nil
-	}
-
-	c := make(map[string]interface{}, len(m))
-	for k, v := range m {
-		c[k] = v
-	}
-	return c
-}
-
 // MergeMapStringString will merge two maps into one. If a duplicate key exists
 // the value in the second map will replace the value in the first map. If both
 // maps are empty or nil this returns an empty map.
@@ -360,7 +166,7 @@ func MergeMapStringString(m map[string]string, n map[string]string) map[string]s
 		return m
 	}
 
-	result := CopyMapStringString(m)
+	result := maps.Clone(m)
 
 	for k, v := range n {
 		result[k] = v
@@ -369,80 +175,29 @@ func MergeMapStringString(m map[string]string, n map[string]string) map[string]s
 	return result
 }
 
-// CopyMapStringInt creates a copy of m.
-//
-// Deprecated; use CopyMap instead.
-func CopyMapStringInt(m map[string]int) map[string]int {
+// CopyMapOfSlice creates a copy of m, making copies of each []V.
+func CopyMapOfSlice[K comparable, V any](m map[K][]V) map[K][]V {
 	l := len(m)
 	if l == 0 {
 		return nil
 	}
 
-	c := make(map[string]int, l)
+	c := make(map[K][]V, l)
 	for k, v := range m {
-		c[k] = v
+		c[k] = slices.Clone(v)
 	}
 	return c
 }
 
-// CopyMapStringFloat64 creates a copy of m.
-//
-// Deprecated; use CopyMap instead.
-func CopyMapStringFloat64(m map[string]float64) map[string]float64 {
-	l := len(m)
-	if l == 0 {
-		return nil
+// SliceToMap creates a map from a slice, using keyFn to extract a key from each
+// value. Note this doesn't copy the elements of the slice, so you may need to
+// call slices.Clone on the result
+func SliceToMap[M ~map[K]V, K comparable, V any](slice []V, keyFn func(value V) K) M {
+	result := make(map[K]V, len(slice))
+	for _, item := range slice {
+		result[keyFn(item)] = item
 	}
-
-	c := make(map[string]float64, l)
-	for k, v := range m {
-		c[k] = v
-	}
-	return c
-}
-
-// CopyMapStringSliceString creates a copy of m.
-//
-// todo: a deep value copy version of CopyMap.
-func CopyMapStringSliceString(m map[string][]string) map[string][]string {
-	l := len(m)
-	if l == 0 {
-		return nil
-	}
-
-	c := make(map[string][]string, l)
-	for k, v := range m {
-		c[k] = CopySliceString(v)
-	}
-	return c
-}
-
-// CopySliceString creates a copy of s.
-//
-// Deprecated; use slices.Clone instead.
-func CopySliceString(s []string) []string {
-	l := len(s)
-	if l == 0 {
-		return nil
-	}
-
-	c := make([]string, l)
-	copy(c, s)
-	return c
-}
-
-// CopySliceInt creates a copy of s.
-//
-// Deprecated; use slices.Clone instead.
-func CopySliceInt(s []int) []int {
-	l := len(s)
-	if l == 0 {
-		return nil
-	}
-
-	c := make([]int, l)
-	copy(c, s)
-	return c
+	return result
 }
 
 // CleanEnvVar replaces all occurrences of illegal characters in an environment
@@ -612,6 +367,9 @@ type StopFunc func()
 //
 // Returns the time.Timer and also a StopFunc, forcing the caller to deal
 // with stopping the time.Timer to avoid leaking a goroutine.
+//
+// Note: If creating a Timer that should do nothing until Reset is called, use
+// NewStoppedTimer instead for safely creating the timer in a stopped state.
 func NewSafeTimer(duration time.Duration) (*time.Timer, StopFunc) {
 	if duration <= 0 {
 		// Avoid panic by using the smallest positive value. This is close enough
@@ -629,6 +387,14 @@ func NewSafeTimer(duration time.Duration) (*time.Timer, StopFunc) {
 	return t, cancel
 }
 
+// NewStoppedTimer creates a time.Timer in a stopped state. This is useful when
+// the actual wait time will computed and set later via Reset.
+func NewStoppedTimer() (*time.Timer, StopFunc) {
+	t, f := NewSafeTimer(math.MaxInt64)
+	t.Stop()
+	return t, f
+}
+
 // ConvertSlice takes the input slice and generates a new one using the
 // supplied conversion function to covert the element. This is useful when
 // converting a slice of strings to a slice of structs which wraps the string.
@@ -636,6 +402,17 @@ func ConvertSlice[A, B any](original []A, conversion func(a A) B) []B {
 	result := make([]B, len(original))
 	for i, element := range original {
 		result[i] = conversion(element)
+	}
+	return result
+}
+
+// ConvertMap takes the input map and generates a new one using the supplied
+// conversion function to convert the values. This is useful when converting one
+// map to another using the same keys.
+func ConvertMap[K comparable, A, B any](original map[K]A, conversion func(a A) B) map[K]B {
+	result := make(map[K]B, len(original))
+	for k, a := range original {
+		result[k] = conversion(a)
 	}
 	return result
 }
@@ -658,22 +435,22 @@ func IsMethodHTTP(s string) bool {
 	return true
 }
 
-// EqualsFunc represents a type implementing the Equals method.
-type EqualsFunc[A any] interface {
-	Equals(A) bool
+// EqualFunc represents a type implementing the Equal method.
+type EqualFunc[A any] interface {
+	Equal(A) bool
 }
 
-// ElementsEquals returns true if slices a and b contain the same elements (in
-// no particular order) using the Equals function defined on their type for
+// ElementsEqual returns true if slices a and b contain the same elements (in
+// no particular order) using the Equal function defined on their type for
 // comparison.
-func ElementsEquals[T EqualsFunc[T]](a, b []T) bool {
+func ElementsEqual[T EqualFunc[T]](a, b []T) bool {
 	if len(a) != len(b) {
 		return false
 	}
 OUTER:
 	for _, item := range a {
 		for _, other := range b {
-			if item.Equals(other) {
+			if item.Equal(other) {
 				continue OUTER
 			}
 		}
@@ -685,8 +462,8 @@ OUTER:
 // SliceSetEq returns true if slices a and b contain the same elements (in no
 // particular order), using '==' for comparison.
 //
-// Note: for pointers, consider implementing an Equals method and using
-// ElementsEquals instead.
+// Note: for pointers, consider implementing an Equal method and using
+// ElementsEqual instead.
 func SliceSetEq[T comparable](a, b []T) bool {
 	lenA, lenB := len(a), len(b)
 	if lenA != lenB {
@@ -708,4 +485,21 @@ OUTER:
 		return false
 	}
 	return true
+}
+
+// WithLock executes a function while holding a lock.
+func WithLock(lock sync.Locker, f func()) {
+	lock.Lock()
+	defer lock.Unlock()
+	f()
+}
+
+// Merge takes two variables and returns variable b in case a has zero value.
+// For pointer values please use pointer.Merge.
+func Merge[T comparable](a, b T) T {
+	var zero T
+	if a == zero {
+		return b
+	}
+	return a
 }

@@ -1,3 +1,6 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 # tls_ca.tf defines the certificate authority we use for mTLS
 
 resource "tls_private_key" "ca" {
@@ -19,12 +22,12 @@ resource "tls_self_signed_cert" "ca" {
   allowed_uses      = ["cert_signing"]
 }
 
-resource "local_file" "ca_key" {
+resource "local_sensitive_file" "ca_key" {
   filename = "keys/tls_ca.key"
   content  = tls_private_key.ca.private_key_pem
 }
 
-resource "local_file" "ca_cert" {
+resource "local_sensitive_file" "ca_cert" {
   filename = "keys/tls_ca.crt"
   content  = tls_self_signed_cert.ca.cert_pem
 }

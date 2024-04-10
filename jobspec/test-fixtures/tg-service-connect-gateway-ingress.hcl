@@ -1,3 +1,6 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: MPL-2.0
+
 job "connect_gateway_ingress" {
   group "group" {
     service {
@@ -47,6 +50,23 @@ job "connect_gateway_ingress" {
               service {
                 name  = "nginx"
                 hosts = ["2.2.2.2:8080"]
+                tls {
+                  sds {
+                    cluster_name  = "foo"
+                    cert_resource = "bar"
+                  }
+                }
+                request_headers {
+                  add {
+                    test = "testvalue"
+                  }
+                }
+                response_headers {
+                  remove = ["test2"]
+                }
+                max_connections         = 5120
+                max_pending_requests    = 512
+                max_concurrent_requests = 2048
               }
             }
           }

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package command
 
 import (
@@ -26,7 +29,7 @@ type ACLRoleCreateCommand struct {
 // Help satisfies the cli.Command Help function.
 func (a *ACLRoleCreateCommand) Help() string {
 	helpText := `
-Usage: nomad acl token create [options]
+Usage: nomad acl role create [options]
 
   Create is used to create new ACL roles. Use requires a management token.
 

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package command
 
 import (
@@ -42,7 +45,7 @@ func (a *ACLRoleDeleteCommand) AutocompleteArgs() complete.Predictor { return co
 func (a *ACLRoleDeleteCommand) Synopsis() string { return "Delete an existing ACL role" }
 
 // Name returns the name of this command.
-func (a *ACLRoleDeleteCommand) Name() string { return "acl token delete" }
+func (a *ACLRoleDeleteCommand) Name() string { return "acl role delete" }
 
 // Run satisfies the cli.Command Run function.
 func (a *ACLRoleDeleteCommand) Run(args []string) int {

@@ -1,21 +1,20 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package testutils
 
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	plugin "github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/nomad/ci"
 	"github.com/hashicorp/nomad/client/allocdir"
-	"github.com/hashicorp/nomad/client/config"
-	"github.com/hashicorp/nomad/client/lib/cgutil"
 	"github.com/hashicorp/nomad/client/logmon"
 	"github.com/hashicorp/nomad/client/taskenv"
 	"github.com/hashicorp/nomad/helper/testlog"
@@ -24,9 +23,10 @@ import (
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/plugins/base"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/hashicorp/nomad/plugins/drivers/fsisolation"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
 	testing "github.com/mitchellh/go-testing-interface"
-	"github.com/stretchr/testify/require"
+	"github.com/shoenig/test/must"
 )
 
 type DriverHarness struct {
@@ -47,6 +47,7 @@ func NewDriverHarness(t testing.T, d drivers.DriverPlugin) *DriverHarness {
 	pd := drivers.NewDriverPlugin(d, logger)
 
 	client, server := plugin.TestPluginGRPCConn(t,
+		true,
 		map[string]plugin.Plugin{
 			base.PluginTypeDriver: pd,
 			base.PluginTypeBase:   &base.PluginBase{Impl: d},
@@ -55,7 +56,7 @@ func NewDriverHarness(t testing.T, d drivers.DriverPlugin) *DriverHarness {
 	)
 
 	raw, err := client.Dispense(base.PluginTypeDriver)
-	require.NoError(t, err, "failed to dispense plugin")
+	must.NoError(t, err)
 
 	dClient := raw.(drivers.DriverPlugin)
 	return &DriverHarness{
@@ -68,46 +69,9 @@ func NewDriverHarness(t testing.T, d drivers.DriverPlugin) *DriverHarness {
 	}
 }
 
-// setupCgroupV2 creates a v2 cgroup for the task, as if a Client were initialized
-// and managing the cgroup as it normally would via the cpuset manager.
-//
-// Note that we are being lazy and trying to avoid importing cgutil because
-// currently plugins/drivers/testutils is platform agnostic-ish.
-//
-// Some drivers (raw_exec) setup their own cgroup, while others (exec, java, docker)
-// would otherwise depend on the Nomad cpuset manager (and docker daemon) to create
-// one, which isn't available here in testing, and so we create one via the harness.
-// Plumbing such metadata through to the harness is a mind bender, so we just always
-// create the cgroup, but at least put it under 'testing.slice'.
-//
-// tl;dr raw_exec tests should ignore this cgroup.
-func (h *DriverHarness) setupCgroupV2(allocID, task string) {
-	if cgutil.UseV2 {
-		h.cgroup = filepath.Join(cgutil.CgroupRoot, "testing.slice", cgutil.CgroupScope(allocID, task))
-		h.logger.Trace("create cgroup for test", "parent", "testing.slice", "id", allocID, "task", task, "path", h.cgroup)
-		if err := os.MkdirAll(h.cgroup, 0755); err != nil {
-			panic(err)
-		}
-	}
-}
-
 func (h *DriverHarness) Kill() {
 	_ = h.client.Close()
 	h.server.Stop()
-	h.cleanupCgroup()
-}
-
-// cleanupCgroup might cleanup a cgroup that may or may not be tricked by DriverHarness.
-func (h *DriverHarness) cleanupCgroup() {
-	// some [non-exec] tests don't bother with MkAllocDir which is what would create
-	// the cgroup, but then do call Kill, so in that case skip the cgroup cleanup
-	if cgutil.UseV2 && h.cgroup != "" {
-		if err := os.Remove(h.cgroup); err != nil && !os.IsNotExist(err) {
-			// in some cases the driver will cleanup the cgroup itself, in which
-			// case we do not care about the cgroup not existing at cleanup time
-			h.t.Fatalf("failed to cleanup cgroup: %v", err)
-		}
-	}
 }
 
 // MkAllocDir creates a temporary directory and allocdir structure.
@@ -116,22 +80,26 @@ func (h *DriverHarness) cleanupCgroup() {
 // A cleanup func is returned and should be deferred so as to not leak dirs
 // between tests.
 func (h *DriverHarness) MkAllocDir(t *drivers.TaskConfig, enableLogs bool) func() {
-	dir, err := ioutil.TempDir("", "nomad_driver_harness-")
-	require.NoError(h.t, err)
+	dir, err := os.MkdirTemp("", "nomad_driver_harness-")
+	must.NoError(h.t, err)
 
-	allocDir := allocdir.NewAllocDir(h.logger, dir, t.AllocID)
-	require.NoError(h.t, allocDir.Build())
+	mountsDir, err := os.MkdirTemp("", "nomad_driver_harness-mounts-")
+	must.NoError(h.t, err)
+	must.NoError(h.t, os.Chmod(mountsDir, 0755))
+
+	allocDir := allocdir.NewAllocDir(h.logger, dir, mountsDir, t.AllocID)
+	must.NoError(h.t, allocDir.Build())
 
 	t.AllocDir = allocDir.AllocDir
 
 	taskDir := allocDir.NewTaskDir(t.Name)
 
 	caps, err := h.Capabilities()
-	require.NoError(h.t, err)
+	must.NoError(h.t, err)
 
 	fsi := caps.FSIsolation
 	h.logger.Trace("FS isolation", "fsi", fsi)
-	require.NoError(h.t, taskDir.Build(fsi == drivers.FSIsolationChroot, ci.TinyChroot))
+	must.NoError(h.t, taskDir.Build(fsi, ci.TinyChroot, t.User))
 
 	task := &structs.Task{
 		Name: t.Name,
@@ -146,7 +114,7 @@ func (h *DriverHarness) MkAllocDir(t *drivers.TaskConfig, enableLogs bool) func(
 	}
 
 	taskBuilder := taskenv.NewBuilder(mock.Node(), alloc, task, "global")
-	SetEnvvars(taskBuilder, fsi, taskDir, config.DefaultConfig())
+	SetEnvvars(taskBuilder, fsi, taskDir)
 
 	taskEnv := taskBuilder.Build()
 	if t.Env == nil {
@@ -158,9 +126,6 @@ func (h *DriverHarness) MkAllocDir(t *drivers.TaskConfig, enableLogs bool) func(
 			}
 		}
 	}
-
-	// setup a v2 cgroup for test cases that assume one exists
-	h.setupCgroupV2(alloc.ID, task.Name)
 
 	//logmon
 	if enableLogs {
@@ -182,7 +147,7 @@ func (h *DriverHarness) MkAllocDir(t *drivers.TaskConfig, enableLogs bool) func(
 			MaxFiles:      10,
 			MaxFileSizeMB: 10,
 		})
-		require.NoError(h.t, err)
+		must.NoError(h.t, err)
 
 		return func() {
 			lm.Stop()
@@ -194,7 +159,6 @@ func (h *DriverHarness) MkAllocDir(t *drivers.TaskConfig, enableLogs bool) func(
 	return func() {
 		h.client.Close()
 		allocDir.Destroy()
-		h.cleanupCgroup()
 	}
 }
 
@@ -292,7 +256,7 @@ func (d *MockDriver) ExecTaskStreaming(ctx context.Context, taskID string, execO
 }
 
 // SetEnvvars sets path and host env vars depending on the FS isolation used.
-func SetEnvvars(envBuilder *taskenv.Builder, fsi drivers.FSIsolation, taskDir *allocdir.TaskDir, conf *config.Config) {
+func SetEnvvars(envBuilder *taskenv.Builder, fsmode fsisolation.Mode, taskDir *allocdir.TaskDir) {
 
 	envBuilder.SetClientTaskRoot(taskDir.Dir)
 	envBuilder.SetClientSharedAllocDir(taskDir.SharedAllocDir)
@@ -300,8 +264,13 @@ func SetEnvvars(envBuilder *taskenv.Builder, fsi drivers.FSIsolation, taskDir *a
 	envBuilder.SetClientTaskSecretsDir(taskDir.SecretsDir)
 
 	// Set driver-specific environment variables
-	switch fsi {
-	case drivers.FSIsolationNone:
+	switch fsmode {
+	case fsisolation.Unveil:
+		// Use mounts host paths
+		envBuilder.SetAllocDir(filepath.Join(taskDir.MountsAllocDir, "alloc"))
+		envBuilder.SetTaskLocalDir(filepath.Join(taskDir.MountsTaskDir, "local"))
+		envBuilder.SetSecretsDir(filepath.Join(taskDir.SecretsDir, "secrets"))
+	case fsisolation.None:
 		// Use host paths
 		envBuilder.SetAllocDir(taskDir.SharedAllocDir)
 		envBuilder.SetTaskLocalDir(taskDir.LocalDir)
@@ -314,12 +283,7 @@ func SetEnvvars(envBuilder *taskenv.Builder, fsi drivers.FSIsolation, taskDir *a
 	}
 
 	// Set the host environment variables for non-image based drivers
-	if fsi != drivers.FSIsolationImage {
-		// COMPAT(1.0) using inclusive language, blacklist is kept for backward compatibility.
-		filter := strings.Split(conf.ReadAlternativeDefault(
-			[]string{"env.denylist", "env.blacklist"},
-			config.DefaultEnvDenylist,
-		), ",")
-		envBuilder.SetHostEnvvars(filter)
+	if fsmode != fsisolation.Image {
+		envBuilder.SetHostEnvvars([]string{"env.denylist"})
 	}
 }

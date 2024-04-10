@@ -1,19 +1,21 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package command
 
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dustin/go-humanize"
-	"github.com/posener/complete"
-
 	"github.com/hashicorp/nomad/api"
 	"github.com/hashicorp/nomad/api/contexts"
-	"github.com/hashicorp/nomad/helper"
+	"github.com/posener/complete"
 )
 
 type AllocStatusCommand struct {
@@ -623,7 +625,7 @@ func (c *AllocStatusCommand) outputTaskResources(alloc *api.Allocation, task str
 				// Nomad uses RSS as the top-level metric to report, for historical reasons,
 				// but it's not always measured (e.g. with cgroup-v2)
 				usage := ms.RSS
-				if usage == 0 && !helper.SliceStringContains(ms.Measured, "RSS") {
+				if usage == 0 && !slices.Contains(ms.Measured, "RSS") {
 					usage = ms.Usage
 				}
 				memUsage = fmt.Sprintf("%v/%v", humanize.IBytes(usage), memUsage)
@@ -884,11 +886,11 @@ FOUND:
 	if len(hostVolumesOutput) > 1 {
 		c.Ui.Output("Host Volumes:")
 		c.Ui.Output(formatList(hostVolumesOutput))
-		c.Ui.Output("") // line padding to next stanza
+		c.Ui.Output("") // line padding to next block
 	}
 	if len(csiVolumesOutput) > 1 {
 		c.Ui.Output("CSI Volumes:")
 		c.Ui.Output(formatList(csiVolumesOutput))
-		c.Ui.Output("") // line padding to next stanza
+		c.Ui.Output("") // line padding to next block
 	}
 }

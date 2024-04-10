@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package command
 
 import (
@@ -11,7 +14,7 @@ import (
 )
 
 // OperatorRootKeyringCommand is a Command implementation
-// that handles querying, installing, and removing root
+// that handles querying, rotating, and removing root
 // encryption keys from a keyring.
 type OperatorRootKeyringCommand struct {
 	Meta
@@ -38,10 +41,6 @@ Usage: nomad operator root keyring [options]
   Remove an encryption key from the keyring:
 
       $ nomad operator root keyring remove <key ID>
-
-  Install an encryption key from backup:
-
-      $ nomad operator root keyring install <path to .json file>
 
   Please see individual subcommand help for detailed usage information.
 `

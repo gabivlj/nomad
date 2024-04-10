@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package nomad
 
 import (
@@ -148,7 +151,7 @@ func TestServersMeetMinimumVersionExcludingFailed(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		result := ServersMeetMinimumVersion(tc.members, tc.ver, false)
+		result := ServersMeetMinimumVersion(tc.members, AllRegions, tc.ver, false)
 		if result != tc.expected {
 			t.Fatalf("bad: %v, %v, %v", result, tc.ver.String(), tc)
 		}
@@ -186,7 +189,7 @@ func TestServersMeetMinimumVersionIncludingFailed(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		result := ServersMeetMinimumVersion(tc.members, tc.ver, true)
+		result := ServersMeetMinimumVersion(tc.members, AllRegions, tc.ver, true)
 		if result != tc.expected {
 			t.Fatalf("bad: %v, %v, %v", result, tc.ver.String(), tc)
 		}
@@ -194,7 +197,7 @@ func TestServersMeetMinimumVersionIncludingFailed(t *testing.T) {
 }
 
 func TestServersMeetMinimumVersionSuffix(t *testing.T) {
-	t.Parallel()
+	ci.Parallel(t)
 
 	cases := []struct {
 		members  []serf.Member
@@ -224,7 +227,7 @@ func TestServersMeetMinimumVersionSuffix(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		result := ServersMeetMinimumVersion(tc.members, tc.ver, true)
+		result := ServersMeetMinimumVersion(tc.members, AllRegions, tc.ver, true)
 		if result != tc.expected {
 			t.Fatalf("bad: %v, %v, %v", result, tc.ver.String(), tc)
 		}

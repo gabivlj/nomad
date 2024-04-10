@@ -1,9 +1,12 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package config
 
 import (
+	"slices"
 	"time"
 
-	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/helper/pointer"
 )
 
@@ -139,9 +142,9 @@ func (a *AuditFilter) Copy() *AuditFilter {
 	*nc = *a
 
 	// Copy slices
-	nc.Endpoints = helper.CopySliceString(nc.Endpoints)
-	nc.Stages = helper.CopySliceString(nc.Stages)
-	nc.Operations = helper.CopySliceString(nc.Operations)
+	nc.Endpoints = slices.Clone(nc.Endpoints)
+	nc.Stages = slices.Clone(nc.Stages)
+	nc.Operations = slices.Clone(nc.Operations)
 
 	return nc
 }

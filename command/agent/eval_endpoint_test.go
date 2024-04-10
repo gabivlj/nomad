@@ -1,9 +1,13 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package agent
 
 import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/hashicorp/nomad/api"
@@ -11,6 +15,7 @@ import (
 	"github.com/hashicorp/nomad/helper/uuid"
 	"github.com/hashicorp/nomad/nomad/mock"
 	"github.com/hashicorp/nomad/nomad/structs"
+	"github.com/shoenig/test/must"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +30,7 @@ func TestHTTP_EvalList(t *testing.T) {
 		require.NoError(t, err)
 
 		// simple list request
-		req, err := http.NewRequest("GET", "/v1/evaluations", nil)
+		req, err := http.NewRequest(http.MethodGet, "/v1/evaluations", nil)
 		require.NoError(t, err)
 		respW := httptest.NewRecorder()
 		obj, err := s.Server.EvalsRequest(respW, req)
@@ -38,7 +43,7 @@ func TestHTTP_EvalList(t *testing.T) {
 		require.Len(t, obj.([]*structs.Evaluation), 2, "expected 2 evals")
 
 		// paginated list request
-		req, err = http.NewRequest("GET", "/v1/evaluations?per_page=1", nil)
+		req, err = http.NewRequest(http.MethodGet, "/v1/evaluations?per_page=1", nil)
 		require.NoError(t, err)
 		respW = httptest.NewRecorder()
 		obj, err = s.Server.EvalsRequest(respW, req)
@@ -48,7 +53,7 @@ func TestHTTP_EvalList(t *testing.T) {
 		require.Len(t, obj.([]*structs.Evaluation), 1, "expected 1 eval")
 
 		// filtered list request
-		req, err = http.NewRequest("GET",
+		req, err = http.NewRequest(http.MethodGet,
 			fmt.Sprintf("/v1/evaluations?per_page=10&job=%s", eval2.JobID), nil)
 		require.NoError(t, err)
 		respW = httptest.NewRecorder()
@@ -76,7 +81,7 @@ func TestHTTP_EvalPrefixList(t *testing.T) {
 		}
 
 		// Make the HTTP request
-		req, err := http.NewRequest("GET", "/v1/evaluations?prefix=aaab", nil)
+		req, err := http.NewRequest(http.MethodGet, "/v1/evaluations?prefix=aaab", nil)
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -136,7 +141,7 @@ func TestHTTP_EvalsDelete(t *testing.T) {
 					// Make the request and check the response.
 					obj, err := s.Server.EvalsRequest(respW, req)
 					require.Equal(t,
-						CodedError(http.StatusBadRequest, "request does not include any evaluation IDs"), err)
+						CodedError(http.StatusBadRequest, "evals must be deleted by either ID or filter"), err)
 					require.Nil(t, obj)
 				})
 			},
@@ -167,7 +172,7 @@ func TestHTTP_EvalsDelete(t *testing.T) {
 					obj, err := s.Server.EvalsRequest(respW, req)
 					require.Equal(t,
 						CodedError(http.StatusBadRequest,
-							"request includes 8000 evaluations IDs, must be 7281 or fewer"), err)
+							"request includes 8000 evaluation IDs, must be 7281 or fewer"), err)
 					require.Nil(t, obj)
 				})
 			},
@@ -221,8 +226,10 @@ func TestHTTP_EvalsDelete(t *testing.T) {
 
 					// Make the request and check the response.
 					obj, err := s.Server.EvalsRequest(respW, req)
-					require.Nil(t, err)
-					require.Nil(t, obj)
+					require.NoError(t, err)
+					require.NotNil(t, obj)
+					deleteResp := obj.(structs.EvalDeleteResponse)
+					require.Equal(t, deleteResp.Count, 1)
 
 					// Ensure the eval is not found.
 					readEval, err := s.Agent.server.State().EvalByID(nil, mockEval.ID)
@@ -257,7 +264,7 @@ func TestHTTP_EvalAllocations(t *testing.T) {
 		}
 
 		// Make the HTTP request
-		req, err := http.NewRequest("GET",
+		req, err := http.NewRequest(http.MethodGet,
 			"/v1/evaluation/"+alloc1.EvalID+"/allocations", nil)
 		if err != nil {
 			t.Fatalf("err: %v", err)
@@ -301,7 +308,7 @@ func TestHTTP_EvalQuery(t *testing.T) {
 		}
 
 		// Make the HTTP request
-		req, err := http.NewRequest("GET", "/v1/evaluation/"+eval.ID, nil)
+		req, err := http.NewRequest(http.MethodGet, "/v1/evaluation/"+eval.ID, nil)
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -348,7 +355,7 @@ func TestHTTP_EvalQueryWithRelated(t *testing.T) {
 		require.NoError(t, err)
 
 		// Make the HTTP request
-		req, err := http.NewRequest("GET", fmt.Sprintf("/v1/evaluation/%s?related=true", eval1.ID), nil)
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("/v1/evaluation/%s?related=true", eval1.ID), nil)
 		require.NoError(t, err)
 		respW := httptest.NewRecorder()
 
@@ -370,5 +377,47 @@ func TestHTTP_EvalQueryWithRelated(t *testing.T) {
 			eval2.Stub(),
 		}
 		require.Equal(t, expected, e.RelatedEvals)
+	})
+}
+
+func TestHTTP_EvalCount(t *testing.T) {
+	ci.Parallel(t)
+	httpTest(t, nil, func(s *TestAgent) {
+		// Directly manipulate the state
+		state := s.Agent.server.State()
+		eval1 := mock.Eval()
+		eval2 := mock.Eval()
+		err := state.UpsertEvals(structs.MsgTypeTestSetup, 1000, []*structs.Evaluation{eval1, eval2})
+		must.NoError(t, err)
+
+		// simple count request
+		req, err := http.NewRequest(http.MethodGet, "/v1/evaluations/count", nil)
+		must.NoError(t, err)
+		respW := httptest.NewRecorder()
+		obj, err := s.Server.EvalsCountRequest(respW, req)
+		must.NoError(t, err)
+
+		// check headers and response body
+		must.NotEq(t, "", respW.Result().Header.Get("X-Nomad-Index"),
+			must.Sprint("missing index"))
+		must.Eq(t, "true", respW.Result().Header.Get("X-Nomad-KnownLeader"),
+			must.Sprint("missing known leader"))
+		must.NotEq(t, "", respW.Result().Header.Get("X-Nomad-LastContact"),
+			must.Sprint("missing last contact"))
+
+		resp := obj.(*structs.EvalCountResponse)
+		must.Eq(t, resp.Count, 2)
+
+		// filtered count request
+		v := url.Values{}
+		v.Add("filter", fmt.Sprintf("JobID==\"%s\"", eval2.JobID))
+		req, err = http.NewRequest(http.MethodGet, "/v1/evaluations/count?"+v.Encode(), nil)
+		must.NoError(t, err)
+		respW = httptest.NewRecorder()
+		obj, err = s.Server.EvalsCountRequest(respW, req)
+		must.NoError(t, err)
+		resp = obj.(*structs.EvalCountResponse)
+		must.Eq(t, resp.Count, 1)
+
 	})
 }

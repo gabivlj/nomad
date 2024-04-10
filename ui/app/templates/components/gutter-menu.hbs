@@ -1,3 +1,8 @@
+{{!
+  Copyright (c) HashiCorp, Inc.
+  SPDX-License-Identifier: BUSL-1.1
+~}}
+
 <div
   data-test-gutter-menu
   class="page-column is-left {{if this.isOpen "is-open"}}"
@@ -114,7 +119,7 @@
         </li>
       </ul>
       <p class="menu-label">
-        Debugging
+        Operations
       </p>
       <ul class="menu-list">
         <li {{keyboard-shortcut menuLevel=true pattern=(array "g" "e") }}>
@@ -126,6 +131,23 @@
             Evaluations
           </LinkTo>
         </li>
+        {{#if (can "list policies")}}
+          <li
+            {{keyboard-shortcut
+              menuLevel=true
+              pattern=(array "g" "a")
+              action=(action this.transitionTo 'access-control')
+            }}
+          >
+            <LinkTo
+              @route="access-control"
+              @activeClass="is-active"
+              data-test-gutter-link="access-control"
+            >
+              Access Control
+            </LinkTo>
+          </li>
+        {{/if}}
       </ul>
     </aside>
     {{#if this.system.agent.version}}

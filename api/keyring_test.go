@@ -1,67 +1,52 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package api
 
 import (
-	"encoding/base64"
-	"math/rand"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/hashicorp/nomad/api/internal/testutil"
+	"github.com/shoenig/test/must"
 )
 
 func TestKeyring_CRUD(t *testing.T) {
 	testutil.Parallel(t)
+
 	c, s := makeClient(t, nil, nil)
 	defer s.Stop()
 
 	kr := c.Keyring()
 
+	// Find the bootstrap key
+	keys, qm, err := kr.List(nil)
+	must.NoError(t, err)
+	assertQueryMeta(t, qm)
+	must.Len(t, 1, keys)
+	oldKeyID := keys[0].KeyID
+
 	// Create a key by requesting a rotation
 	key, wm, err := kr.Rotate(nil, nil)
-	require.NoError(t, err)
-	require.NotNil(t, key)
+	must.NoError(t, err)
+	must.NotNil(t, key)
 	assertWriteMeta(t, wm)
 
 	// Read all the keys
-	keys, qm, err := kr.List(&QueryOptions{WaitIndex: key.CreateIndex})
-	require.NoError(t, err)
+	keys, qm, err = kr.List(&QueryOptions{WaitIndex: key.CreateIndex})
+	must.NoError(t, err)
 	assertQueryMeta(t, qm)
-	require.Len(t, keys, 2)
-
-	// Write a new active key, forcing a rotation
-	id := "fd77c376-9785-4c80-8e62-4ec3ab5f8b9a"
-	buf := make([]byte, 32)
-	rand.Read(buf)
-	encodedKey := base64.StdEncoding.EncodeToString(buf)
-
-	wm, err = kr.Update(&RootKey{
-		Key: encodedKey,
-		Meta: &RootKeyMeta{
-			KeyID:     id,
-			State:     RootKeyStateActive,
-			Algorithm: EncryptionAlgorithmAES256GCM,
-		}}, nil)
-	require.NoError(t, err)
-	assertWriteMeta(t, wm)
+	must.Len(t, 2, keys)
 
 	// Delete the old key
-	wm, err = kr.Delete(&KeyringDeleteOptions{KeyID: keys[0].KeyID}, nil)
-	require.NoError(t, err)
+	wm, err = kr.Delete(&KeyringDeleteOptions{KeyID: oldKeyID}, nil)
+	must.NoError(t, err)
 	assertWriteMeta(t, wm)
 
 	// Read all the keys back
 	keys, qm, err = kr.List(&QueryOptions{WaitIndex: key.CreateIndex})
-	require.NoError(t, err)
+	must.NoError(t, err)
 	assertQueryMeta(t, qm)
-	require.Len(t, keys, 2)
-	for _, key := range keys {
-		if key.KeyID == id {
-			require.Equal(t, RootKeyState(RootKeyStateActive),
-				key.State, "new key should be active")
-		} else {
-			require.Equal(t, RootKeyState(RootKeyStateInactive),
-				key.State, "initial key should be inactive")
-		}
-	}
+	must.Len(t, 1, keys)
+	must.Eq(t, key.KeyID, keys[0].KeyID)
+	must.Eq(t, RootKeyState(RootKeyStateActive), keys[0].State)
 }

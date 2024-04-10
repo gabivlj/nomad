@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package consul
 
 import (
@@ -9,7 +12,7 @@ import (
 )
 
 func BuildAllocServices(
-	node *structs.Node, alloc *structs.Allocation, restarter WorkloadRestarter) *serviceregistration.WorkloadServices {
+	node *structs.Node, alloc *structs.Allocation, restarter serviceregistration.WorkloadRestarter) *serviceregistration.WorkloadServices {
 
 	//TODO(schmichael) only support one network for now
 	net := alloc.AllocatedResources.Shared.Networks[0]
@@ -17,8 +20,10 @@ func BuildAllocServices(
 	tg := alloc.Job.LookupTaskGroup(alloc.TaskGroup)
 
 	ws := &serviceregistration.WorkloadServices{
-		AllocID:  alloc.ID,
-		Group:    alloc.TaskGroup,
+		AllocInfo: structs.AllocInfo{
+			AllocID: alloc.ID,
+			Group:   alloc.TaskGroup,
+		},
 		Services: taskenv.InterpolateServices(taskenv.NewBuilder(mock.Node(), alloc, nil, alloc.Job.Region).Build(), tg.Services),
 		Networks: alloc.AllocatedResources.Shared.Networks,
 

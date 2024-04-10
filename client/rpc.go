@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package client
 
 import (
@@ -9,7 +12,7 @@ import (
 	"time"
 
 	metrics "github.com/armon/go-metrics"
-	"github.com/hashicorp/go-msgpack/codec"
+	"github.com/hashicorp/go-msgpack/v2/codec"
 	"github.com/hashicorp/nomad/client/servers"
 	"github.com/hashicorp/nomad/helper"
 	inmem "github.com/hashicorp/nomad/helper/codec"
@@ -24,6 +27,7 @@ type rpcEndpoints struct {
 	FileSystem  *FileSystem
 	Allocations *Allocations
 	Agent       *Agent
+	NodeMeta    *NodeMeta
 }
 
 // ClientRPC is used to make a local, client only RPC call
@@ -46,7 +50,27 @@ func (c *Client) StreamingRpcHandler(method string) (structs.StreamingRpcHandler
 }
 
 // RPC is used to forward an RPC call to a nomad server, or fail if no servers.
-func (c *Client) RPC(method string, args interface{}, reply interface{}) error {
+func (c *Client) RPC(method string, args any, reply any) error {
+	// Block if we have not yet registered the node, to enforce that we only
+	// send authenticated calls after the node has been registered
+	select {
+	case <-c.registeredCh:
+	case <-c.shutdownCh:
+		return nil
+	}
+	return c.rpc(method, args, reply)
+}
+
+// UnauthenticatedRPC special-cases the Node.Register RPC call, forwarding the
+// call to a nomad server without blocking on the initial node registration.
+func (c *Client) UnauthenticatedRPC(method string, args any, reply any) error {
+	return c.rpc(method, args, reply)
+}
+
+// rpc implements the forwarding of a RPC call to a nomad server, or fail if
+// no servers.
+func (c *Client) rpc(method string, args any, reply any) error {
+
 	conf := c.GetConfig()
 
 	// Invoke the RPCHandler if it exists
@@ -70,34 +94,37 @@ func (c *Client) RPC(method string, args interface{}, reply interface{}) error {
 	}
 
 TRY:
+	var rpcErr error
+
 	server := c.servers.FindServer()
 	if server == nil {
-		return noServersErr
+		rpcErr = noServersErr
+	} else {
+		// Make the request.
+		rpcErr = c.connPool.RPC(c.Region(), server.Addr, method, args, reply)
+
+		if rpcErr == nil {
+			c.fireRpcRetryWatcher()
+			return nil
+		}
+
+		// If shutting down, exit without logging the error
+		select {
+		case <-c.shutdownCh:
+			return nil
+		default:
+		}
+
+		// Move off to another server, and see if we can retry.
+		c.rpcLogger.Error("error performing RPC to server", "error", rpcErr, "rpc", method, "server", server.Addr)
+		c.servers.NotifyFailedServer(server)
+
+		if !canRetry(args, rpcErr) {
+			c.rpcLogger.Error("error performing RPC to server which is not safe to automatically retry", "error", rpcErr, "rpc", method, "server", server.Addr)
+			return rpcErr
+		}
 	}
 
-	// Make the request.
-	rpcErr := c.connPool.RPC(c.Region(), server.Addr, method, args, reply)
-
-	if rpcErr == nil {
-		c.fireRpcRetryWatcher()
-		return nil
-	}
-
-	// If shutting down, exit without logging the error
-	select {
-	case <-c.shutdownCh:
-		return nil
-	default:
-	}
-
-	// Move off to another server, and see if we can retry.
-	c.rpcLogger.Error("error performing RPC to server", "error", rpcErr, "rpc", method, "server", server.Addr)
-	c.servers.NotifyFailedServer(server)
-
-	if !canRetry(args, rpcErr) {
-		c.rpcLogger.Error("error performing RPC to server which is not safe to automatically retry", "error", rpcErr, "rpc", method, "server", server.Addr)
-		return rpcErr
-	}
 	if time.Now().After(deadline) {
 		// Blocking queries are tricky.  jitters and rpcholdtimes in multiple places can result in our server call taking longer than we wanted it to. For example:
 		// a block time of 5s may easily turn into the server blocking for 10s since it applies its own RPCHoldTime. If the server dies at t=7s we still want to retry
@@ -106,7 +133,7 @@ TRY:
 			info.SetTimeToBlock(0)
 			return c.RPC(method, args, reply)
 		}
-		c.rpcLogger.Error("error performing RPC to server, deadline exceeded, cannot retry", "error", rpcErr, "rpc", method, "server", server.Addr)
+		c.rpcLogger.Error("error performing RPC to server, deadline exceeded, cannot retry", "error", rpcErr, "rpc", method)
 		return rpcErr
 	}
 
@@ -265,6 +292,7 @@ func (c *Client) setupClientRpc(rpcs map[string]interface{}) {
 		c.endpoints.FileSystem = NewFileSystemEndpoint(c)
 		c.endpoints.Allocations = NewAllocationsEndpoint(c)
 		c.endpoints.Agent = NewAgentEndpoint(c)
+		c.endpoints.NodeMeta = newNodeMetaEndpoint(c)
 		c.setupClientRpcServer(c.rpcServer)
 	}
 
@@ -279,6 +307,7 @@ func (c *Client) setupClientRpcServer(server *rpc.Server) {
 	server.Register(c.endpoints.FileSystem)
 	server.Register(c.endpoints.Allocations)
 	server.Register(c.endpoints.Agent)
+	server.Register(c.endpoints.NodeMeta)
 }
 
 // rpcConnListener is a long lived function that listens for new connections
@@ -419,11 +448,15 @@ func resolveServer(s string) (net.Addr, error) {
 	host, port, err := net.SplitHostPort(s)
 	if err != nil {
 		if strings.Contains(err.Error(), "missing port") {
-			host = s
-			port = defaultClientPort
+			// with IPv6 addresses the `host` variable will have brackets
+			// removed, so send the original value thru again with only the
+			// correct port suffix
+			return resolveServer(s + ":" + defaultClientPort)
 		} else {
 			return nil, err
 		}
+	} else if port == "" {
+		return resolveServer(s + defaultClientPort)
 	}
 	return net.ResolveTCPAddr("tcp", net.JoinHostPort(host, port))
 }
@@ -431,8 +464,13 @@ func resolveServer(s string) (net.Addr, error) {
 // Ping is used to ping a particular server and returns whether it is healthy or
 // a potential error.
 func (c *Client) Ping(srv net.Addr) error {
+	pingRequest := &structs.GenericRequest{
+		QueryOptions: structs.QueryOptions{
+			AuthToken: c.secretNodeID(),
+		},
+	}
 	var reply struct{}
-	err := c.connPool.RPC(c.Region(), srv, "Status.Ping", struct{}{}, &reply)
+	err := c.connPool.RPC(c.Region(), srv, "Status.Ping", pingRequest, &reply)
 	return err
 }
 

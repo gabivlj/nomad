@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) HashiCorp, Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ */
+
 .keyboard-shortcuts {
   position: fixed;
   background-color: white;
@@ -94,7 +99,6 @@
 
 // Global keyboard hint style
 
-// .display-hints {
 [data-shortcut] {
   background: lighten($nomad-green, 25%);
   border: 1px solid $nomad-green-dark;
@@ -113,7 +117,6 @@
     z-index: $z-tooltip;
   }
 }
-// }
 
 @keyframes slideIn {
   from {

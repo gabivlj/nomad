@@ -1,7 +1,12 @@
+/**
+ * Copyright (c) HashiCorp, Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ */
+
 // @ts-check
 
 import Component from '@glimmer/component';
-import { action } from '@ember/object';
+import { action, computed } from '@ember/object';
 import { tracked } from '@glimmer/tracking';
 import { inject as service } from '@ember/service';
 import { trimPath } from '../helpers/trim-path';
@@ -12,6 +17,7 @@ import MutableArray from '@ember/array/mutable';
 import { A } from '@ember/array';
 import { stringifyObject } from 'nomad-ui/helpers/stringify-object';
 import notifyConflict from 'nomad-ui/utils/notify-conflict';
+import isEqual from 'lodash.isequal';
 
 const EMPTY_KV = {
   key: '',
@@ -19,10 +25,14 @@ const EMPTY_KV = {
   warnings: EmberObject.create(),
 };
 
+// Capture characters that are not _, letters, or numbers using Unicode.
+const invalidKeyCharactersRegex = new RegExp(/[^_\p{Letter}\p{Number}]/gu);
+
 export default class VariableFormComponent extends Component {
-  @service flashMessages;
+  @service notifications;
   @service router;
   @service store;
+  @service can;
 
   @tracked variableNamespace = null;
   @tracked namespaceOptions = null;
@@ -43,6 +53,7 @@ export default class VariableFormComponent extends Component {
   constructor() {
     super(...arguments);
     set(this, 'path', this.args.model.path);
+    this.addExitHandler();
   }
 
   @action
@@ -62,8 +73,21 @@ export default class VariableFormComponent extends Component {
 
   get shouldDisableSave() {
     const disallowedPath =
-      this.path?.startsWith('nomad/') && !this.path?.startsWith('nomad/jobs');
+      this.path?.startsWith('nomad/') &&
+      !(
+        this.path?.startsWith('nomad/jobs') ||
+        (this.path?.startsWith('nomad/job-templates') &&
+          trimPath([this.path]) !== 'nomad/job-templates')
+      );
     return !!this.JSONError || !this.path || disallowedPath;
+  }
+
+  get isJobTemplateVariable() {
+    return this.path?.startsWith('nomad/job-templates/');
+  }
+
+  get jobTemplateName() {
+    return this.path.split('nomad/job-templates/').slice(-1);
   }
 
   /**
@@ -93,7 +117,7 @@ export default class VariableFormComponent extends Component {
     if (!this.args.model?.isNew) {
       keyValues.pushObject(copy(EMPTY_KV));
     }
-    this.keyValues = keyValues;
+    set(this, 'keyValues', keyValues);
 
     this.JSONItems = stringifyObject([
       this.keyValues.reduce((acc, { key, value }) => {
@@ -117,7 +141,9 @@ export default class VariableFormComponent extends Component {
     let existingVariable = existingVariables
       .without(this.args.model)
       .find(
-        (v) => v.path === pathValue && v.namespace === this.variableNamespace
+        (v) =>
+          v.path === pathValue &&
+          (v.namespace === this.variableNamespace || !this.variableNamespace)
       );
     if (existingVariable) {
       return {
@@ -128,12 +154,24 @@ export default class VariableFormComponent extends Component {
     }
   }
 
+  get hasInvalidPath() {
+    let pathNameRegex = new RegExp('^[a-zA-Z0-9-_~/]{1,128}$');
+    return !pathNameRegex.test(trimPath([this.path]));
+  }
+
   @action
   validateKey(entry, e) {
     const value = e.target.value;
-    // No dots in key names
-    if (value.includes('.')) {
-      entry.warnings.set('dottedKeyError', 'Key should not contain a period.');
+    // Only letters, numbers, and _ are allowed in keys
+    const invalidChars = value.match(invalidKeyCharactersRegex);
+    if (invalidChars) {
+      const invalidCharsOuput = [...new Set(invalidChars)]
+        .sort()
+        .map((c) => `'${c}'`);
+      entry.warnings.set(
+        'dottedKeyError',
+        `${value} contains characters [${invalidCharsOuput}] that require the "index" function for direct access in templates.`
+      );
     } else {
       delete entry.warnings.dottedKeyError;
       entry.warnings.notifyPropertyChange('dottedKeyError');
@@ -147,10 +185,14 @@ export default class VariableFormComponent extends Component {
       delete entry.warnings.duplicateKeyError;
       entry.warnings.notifyPropertyChange('duplicateKeyError');
     }
+    set(entry, 'key', value);
   }
 
   @action appendRow() {
-    this.keyValues.pushObject(copy(EMPTY_KV));
+    // Clear our any entity errors
+    let newRow = copy(EMPTY_KV);
+    newRow.warnings = EmberObject.create();
+    this.keyValues.pushObject(newRow);
   }
 
   @action deleteRow(row) {
@@ -164,6 +206,23 @@ export default class VariableFormComponent extends Component {
   @action saveWithOverwrite(e) {
     set(this, 'conflictingVariable', null);
     this.save(e, true);
+  }
+
+  /**
+   *
+   * @param {KeyboardEvent} e
+   */
+  @action setModelPath(e) {
+    set(this, 'path', e.target.value);
+    set(this.args.model, 'path', e.target.value);
+  }
+
+  @action updateKeyValue(key, value) {
+    if (this.keyValues.find((kv) => kv.key === key)) {
+      this.keyValues.find((kv) => kv.key === key).value = value;
+    } else {
+      this.keyValues.pushObject({ key, value, warnings: EmberObject.create() });
+    }
   }
 
   @action
@@ -182,7 +241,7 @@ export default class VariableFormComponent extends Component {
       if (!nonEmptyItems.length) {
         throw new Error('Please provide at least one key/value pair.');
       } else {
-        this.keyValues = nonEmptyItems;
+        set(this, 'keyValues', nonEmptyItems);
       }
 
       if (this.args.model?.isNew) {
@@ -199,36 +258,77 @@ export default class VariableFormComponent extends Component {
       this.args.model.setAndTrimPath();
       await this.args.model.save({ adapterOptions: { overwrite } });
 
-      this.flashMessages.add({
+      this.notifications.add({
         title: 'Variable saved',
         message: `${this.path} successfully saved`,
-        type: 'success',
-        destroyOnClick: false,
-        timeout: 5000,
+        color: 'success',
       });
+
+      if (
+        this.can.can('read job', null, {
+          namespace: this.variableNamespace || 'default',
+        })
+      ) {
+        this.updateJobVariables(this.args.model.pathLinkedEntities.job);
+      }
+
+      this.removeExitHandler();
       this.router.transitionTo('variables.variable', this.args.model.id);
-    } catch (error) {
-      notifyConflict(this)(error);
+    } catch (e) {
+      notifyConflict(this)(e);
       if (!this.hasConflict) {
-        this.flashMessages.add({
+        let errorMessage = e;
+        if (e.errors && e.errors.length > 0) {
+          const nameInvalidError = e.errors.find((err) => err.status === 400);
+          if (nameInvalidError) {
+            errorMessage = nameInvalidError.detail;
+          }
+        }
+
+        console.log('caught an error', e);
+        this.notifications.add({
           title: `Error saving ${this.path}`,
-          message: error,
-          type: 'error',
-          destroyOnClick: false,
+          message: errorMessage,
+          color: 'critical',
           sticky: true,
         });
       } else {
-        if (error.errors[0]?.detail) {
-          set(this, 'conflictingVariable', error.errors[0].detail);
+        if (e.errors[0]?.detail) {
+          set(this, 'conflictingVariable', e.errors[0].detail);
         }
         window.scrollTo(0, 0); // because the k/v list may be long, ensure the user is snapped to top to read error
       }
     }
   }
 
+  /**
+   * A job, its task groups, and tasks, all have a getter called pathLinkedVariable.
+   * These are dependent on a variables list that may already be established. If a variable
+   * is added or removed, this function will update job.variables[] list to reflect the change.
+   * and force an update to the job's pathLinkedVariable getter.
+   */
+  async updateJobVariables(jobName) {
+    if (!jobName) {
+      return;
+    }
+    const fullJobId = JSON.stringify([
+      jobName,
+      this.variableNamespace || 'default',
+    ]);
+    let job = await this.store.findRecord('job', fullJobId, { reload: true });
+    if (job) {
+      job.variables.pushObject(this.args.model);
+    }
+  }
+
   //#region JSON Editing
 
   view = this.args.view;
+
+  get isJSONView() {
+    return this.args.view === 'json';
+  }
+
   // Prevent duplicate onUpdate events when @view is set to its already-existing value,
   // which happens because parent's queryParams and toggle button both resolve independently.
   @action onViewChange([view]) {
@@ -323,7 +423,64 @@ export default class VariableFormComponent extends Component {
     return (
       this.args.model.pathLinkedEntities?.job ||
       this.args.model.pathLinkedEntities?.group ||
-      this.args.model.pathLinkedEntities?.task
+      this.args.model.pathLinkedEntities?.task ||
+      trimPath([this.path]) === 'nomad/jobs'
     );
   }
+
+  //#region Unsaved Changes Confirmation
+
+  hasRemovedExitHandler = false;
+
+  @computed(
+    'args.model.{keyValues,path}',
+    'keyValues.@each.{key,value}',
+    'path'
+  )
+  get hasUserModifiedAttributes() {
+    const compactedBasicKVs = this.keyValues
+      .map((kv) => ({ key: kv.key, value: kv.value }))
+      .filter((kv) => kv.key || kv.value);
+    const compactedPassedKVs = this.args.model.keyValues.filter(
+      (kv) => kv.key || kv.value
+    );
+    const unequal =
+      !isEqual(compactedBasicKVs, compactedPassedKVs) ||
+      !isEqual(this.path, this.args.model.path);
+    return unequal;
+  }
+
+  addExitHandler() {
+    this.router.on('routeWillChange', this, this.confirmExit);
+  }
+
+  removeExitHandler() {
+    if (!this.hasRemovedExitHandler) {
+      this.router.off('routeWillChange', this, this.confirmExit);
+      this.hasRemovedExitHandler = true;
+    }
+  }
+
+  confirmExit(transition) {
+    if (transition.isAborted || transition.queryParamsOnly) return;
+
+    if (this.hasUserModifiedAttributes) {
+      if (
+        !confirm(
+          'Your variable has unsaved changes. Are you sure you want to leave?'
+        )
+      ) {
+        transition.abort();
+      } else {
+        this.removeExitHandler();
+      }
+    }
+  }
+
+  willDestroy() {
+    super.willDestroy(...arguments);
+    this.removeExitHandler();
+  }
+
+  //#endregion Unsaved Changes Confirmation
 }

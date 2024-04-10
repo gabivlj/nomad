@@ -1,3 +1,6 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 rules:
   - id: "no-time-in-fsm"
     patterns:
@@ -6,6 +9,10 @@ rules:
       # Metric state is local to the server and therefore must use time.
       - pattern-not-inside: |
           defer metrics.MeasureSince(...)
+
+      # Metric state is local to the server and therefore must use time.
+      - pattern-not-inside: |
+          defer metrics.MeasureSinceWithLabels(...)
 
       # The timetable's whole point is to roughly track timestamps for Raft log
       # indexes, so it must use time.
@@ -22,5 +29,7 @@ rules:
     severity: "WARNING"
     paths:
       include:
-        - "nomad/fsm.*"
-        - "nomad/state/state_store.*"
+        - "nomad/fsm*"
+        - "nomad/state/state_store*"
+      exclude:
+        - "*_test.go"
